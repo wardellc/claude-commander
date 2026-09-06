@@ -31,10 +31,12 @@ use axum::{
 use claude_commander_core::Config;
 use claude_commander_core::api::SetProgramsRequest;
 use claude_commander_core::error::SessionError;
+use claude_commander_protocol::hosting::{CodeHostProvider, validate_gitlab_hostname};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::ApiError;
+use crate::extract::SafeJson;
 use crate::state::AppState;
 
 /// `GET /config` → `read_config`, with credential fields cleared: the caller
@@ -60,6 +62,8 @@ pub async fn read(State(state): State<AppState>) -> Json<Config> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigPatch {
+    pub code_host_provider: Option<CodeHostProvider>,
+    pub gitlab_hostname: Option<Option<String>>,
     pub branch_prefix: Option<String>,
     pub max_concurrent_tmux: Option<usize>,
     pub capture_cache_ttl_ms: Option<u64>,
@@ -93,6 +97,8 @@ impl ConfigPatch {
             };
         }
         set!(branch_prefix);
+        set!(code_host_provider);
+        set!(gitlab_hostname);
         set!(max_concurrent_tmux);
         set!(capture_cache_ttl_ms);
         set!(diff_cache_ttl_ms);
@@ -134,6 +140,10 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
     if cfg.max_concurrent_tmux == 0 {
         return Err(invalid("max_concurrent_tmux", "must be greater than zero"));
     }
+    if let Some(hostname) = cfg.gitlab_hostname.as_deref() {
+        validate_gitlab_hostname(hostname)
+            .map_err(|reason| invalid("gitlab_hostname", &reason.to_string()))?;
+    }
     Ok(())
 }
 
@@ -144,7 +154,7 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
 /// they cannot be changed here.
 pub async fn update(
     State(state): State<AppState>,
-    Json(patch): Json<ConfigPatch>,
+    SafeJson(patch): SafeJson<ConfigPatch>,
 ) -> Result<StatusCode, ApiError> {
     let mut merged = state.service.read_config();
     patch.apply_to(&mut merged);
@@ -280,6 +290,60 @@ mod tests {
         assert_eq!(after.ui_refresh_fps, 45);
         // An untouched field keeps its prior value.
         assert_eq!(after.worktrees_dir, before.worktrees_dir);
+    }
+
+    #[tokio::test]
+    async fn patch_updates_code_host_and_rejects_unsafe_gitlab_hostname() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({
+                "code_host_provider": "gitlab",
+                "gitlab_hostname": "gitlab.example.com:8443"
+            }),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let config = state.service.read_config();
+        assert_eq!(
+            config.code_host_provider,
+            claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+        );
+        assert_eq!(
+            config.gitlab_hostname.as_deref(),
+            Some("gitlab.example.com:8443")
+        );
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({
+                "gitlab_hostname": "https://user:secret@gitlab.example.com/group"
+            }),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            state.service.read_config().gitlab_hostname.as_deref(),
+            Some("gitlab.example.com:8443")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_gitlab_hostname_shape_never_echoes_a_credential() {
+        let dir = TempDir::new().unwrap();
+        let secret = "glpat-secret-value";
+        let req = Request::patch("/config")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"gitlab_hostname":["https://user:{secret}@gitlab.example.com"]}}"#
+            )))
+            .unwrap();
+        let (status, body) = send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
+        let body = String::from_utf8(body).unwrap();
+        assert!(!body.contains(secret), "credential leaked: {body}");
     }
 
     /// A sensitive path field cannot be changed: `deny_unknown_fields` rejects a

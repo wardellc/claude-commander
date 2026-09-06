@@ -128,10 +128,16 @@ impl App {
                 session_id,
                 info,
             } => {
-                // Same generation-token rule as `PreviewReady` above.
-                if self.ui_state.enriched_pr_fetch_spawned_at == Some(spawned_at) {
-                    self.ui_state.enriched_pr_fetch_spawned_at = None;
+                // Unlike pane previews, enriched review data is provider-bound.
+                // A provider switch clears this token, so rejecting a result
+                // that no longer owns it prevents an in-flight GitHub response
+                // from repopulating caches after switching to GitLab (and vice
+                // versa).
+                if self.ui_state.enriched_pr_fetch_spawned_at != Some(spawned_at) {
+                    debug!("Discarding superseded EnrichedPrReady for {session_id}");
+                    return;
                 }
+                self.ui_state.enriched_pr_fetch_spawned_at = None;
                 // Only apply if the session is still selected
                 if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
                     // An empty result caches nothing, so record the attempt
@@ -294,7 +300,7 @@ impl App {
                 self.refresh_backend_view(BackendId(backend_id)).await;
                 self.refresh_list_items().await;
             }
-            StateUpdate::GithubReposLoaded {
+            StateUpdate::RepositoriesLoaded {
                 backend_id,
                 generation,
                 result,
@@ -306,12 +312,13 @@ impl App {
                 if generation != self.ui_state.repo_picker.generation
                     || self.ui_state.repo_picker.backend.0 != backend_id
                 {
-                    debug!("Discarding stale GitHub repo listing (gen {generation})");
+                    debug!("Discarding stale repository listing (gen {generation})");
                     return;
                 }
                 match result {
-                    Ok(repos) => {
-                        self.ui_state.repo_picker.repos = repos;
+                    Ok(listing) => {
+                        self.ui_state.repo_picker.host = listing.host;
+                        self.ui_state.repo_picker.repos = listing.repositories;
                         self.ui_state.repo_picker.fetch = super::RepoFetch::Ready;
                     }
                     Err(message) => {
@@ -320,7 +327,7 @@ impl App {
                         // the picker's title reflects the state.
                         self.ui_state.repo_picker.repos.clear();
                         self.ui_state.status_message = Some((
-                            format!("Could not list GitHub repos: {message}"),
+                            format!("Could not list repositories: {message}"),
                             Instant::now() + Duration::from_secs(8),
                         ));
                         self.ui_state.repo_picker.fetch = super::RepoFetch::Failed(message);

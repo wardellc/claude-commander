@@ -25,6 +25,7 @@ use crate::api::{
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 
 use super::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -204,6 +205,10 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn list_repositories(&self) -> BResult<RepositoryListing> {
+        self.unavailable()
+    }
+
     async fn start_clone(&self, _req: CloneRequest) -> BResult<CloneJob> {
         self.unavailable()
     }
@@ -304,7 +309,8 @@ mod tests {
     /// server must say *why*, not show an empty list.
     #[tokio::test]
     async fn placeholder_refuses_the_clone_surface() {
-        use claude_commander_protocol::github::{CloneJobId, CloneRequest, CloneSource};
+        use claude_commander_protocol::github::{CloneJobId, CloneRequest};
+        use claude_commander_protocol::hosting::CloneSource;
 
         let b = PlaceholderBackend::new("buildbox", "invalid url");
         let expect_unavailable = |err: BackendError| match err {

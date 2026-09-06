@@ -8,8 +8,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneRequest, CloneSource, GithubRepo, validate_clone_url,
-    validate_dest_name, validate_repo_slug,
+    CloneJob, CloneJobId, CloneRequest, GithubRepo, validate_clone_url, validate_dest_name,
+    validate_repo_slug,
+};
+use claude_commander_protocol::hosting::{
+    CloneSource, CodeHost, CodeHostProvider, RepositoryListing, validate_gitlab_hostname,
+    validate_hosted_repo_slug,
 };
 use futures::StreamExt;
 use tracing::{debug, info, warn};
@@ -64,6 +68,8 @@ pub struct CommanderService {
     /// Cached `gh --version` availability. Computed once (fork/exec is not free)
     /// and reused for every `workspace_snapshot`.
     gh_available: Arc<tokio::sync::OnceCell<bool>>,
+    /// Cached `glab version` availability, independent of the compatibility gh probe.
+    glab_available: Arc<tokio::sync::OnceCell<bool>>,
     /// Shared agent-state detector with a short TTL cache, reused across
     /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
     /// re-capture every pane. A `fresh` call bypasses it with a zero-TTL
@@ -155,6 +161,7 @@ impl CommanderService {
             operations: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             next_op_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             gh_available: Arc::new(tokio::sync::OnceCell::new()),
+            glab_available: Arc::new(tokio::sync::OnceCell::new()),
             agent_detector,
             agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
                 states: BTreeMap::new(),
@@ -315,6 +322,24 @@ impl CommanderService {
         self.telemetry.feature("github.list_repos");
         let timeout = Duration::from_secs(self.config_store.read().repo_list_timeout_secs);
         list_repos(timeout).await
+    }
+
+    /// List repositories using one provider/hostname snapshot from live config.
+    pub async fn list_repositories(&self) -> Result<RepositoryListing> {
+        self.telemetry.feature("repository.list");
+        let (host, timeout) = {
+            let config = self.config_store.read();
+            (
+                CodeHost {
+                    provider: config.code_host_provider,
+                    hostname: (config.code_host_provider == CodeHostProvider::Gitlab)
+                        .then(|| config.gitlab_hostname.clone())
+                        .flatten(),
+                },
+                Duration::from_secs(config.repo_list_timeout_secs),
+            )
+        };
+        crate::git::hosting::list_repositories(host, timeout).await
     }
 
     /// Start cloning a repository into the projects directory, returning the
@@ -697,6 +722,9 @@ impl CommanderService {
 
     pub async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
         self.telemetry.feature("session.create");
+        // One provider governs this entire create, including a stacked
+        // session's eventual launch prompt after the awaited setup steps.
+        let code_host_provider = self.config_store.read().code_host_provider;
         self.manager.check_tmux().await?;
 
         let base_program = opts
@@ -758,7 +786,12 @@ impl CommanderService {
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
                 .await?;
             self.manager
-                .finalize_session(&session_id, opts.initial_prompt, opts.base_branch)
+                .finalize_session_for_provider(
+                    &session_id,
+                    opts.initial_prompt,
+                    opts.base_branch,
+                    code_host_provider,
+                )
                 .await?;
             Ok::<(), crate::Error>(())
         }
@@ -1602,6 +1635,7 @@ impl CommanderService {
     /// run (or when project auto-pull is disabled).
     pub async fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
         let gh_available = self.gh_available().await;
+        let code_host = self.code_host_status().await;
         let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
@@ -1630,6 +1664,7 @@ impl CommanderService {
             operations: self.operations_snapshot(),
             server: ServerStatus {
                 gh_available,
+                code_host,
                 tmux_ok,
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -1871,6 +1906,9 @@ impl CommanderService {
         parent: Option<SessionId>,
     ) -> Result<SetSessionBaseOutcome> {
         self.telemetry.feature("session.set_base");
+        // Keep one provider for the whole operation even if config hot-reloads
+        // while the state mutation is in flight.
+        let provider = self.config_store.read().code_host_provider;
         let session_id = *id;
         let (plan, pr_retarget) = self
             .store
@@ -1893,7 +1931,8 @@ impl CommanderService {
         // is reported rather than logged.
         let pr = match pr_retarget {
             None => PrRetarget::NoPr,
-            Some(r) => match crate::git::try_retarget_pr_base(
+            Some(r) => match crate::git::hosting::try_retarget_review_base(
+                provider,
                 &r.repo_path,
                 r.pr_number,
                 &r.new_base_branch,
@@ -2300,12 +2339,15 @@ impl CommanderService {
                     }
                     *lc = Some(now);
                 }
+                // One provider snapshot governs this entire sweep, including
+                // every awaited branch query.
+                let provider = service.config_store.read().code_host_provider;
                 // Adopt any branch renames before polling, so this same tick
                 // queries GitHub with the corrected `--head` name.
                 if let Err(e) = service.reconcile_session_branches().await {
                     debug!("reconcile_session_branches failed: {e}");
                 }
-                if !service.gh_available().await {
+                if !service.code_host_cli_available(provider).await {
                     continue;
                 }
                 let sessions_to_check = service.pr_poll_targets().await;
@@ -2317,8 +2359,10 @@ impl CommanderService {
                         |(id, branch, repo_path, created_at)| async move {
                             (
                                 id,
-                                crate::git::check_pr_for_branch(&repo_path, &branch, created_at)
-                                    .await,
+                                crate::git::hosting::check_review_for_branch(
+                                    provider, &repo_path, &branch, created_at,
+                                )
+                                .await,
                             )
                         },
                     ))
@@ -2420,6 +2464,36 @@ impl CommanderService {
             .gh_available
             .get_or_init(|| async { is_gh_available().await })
             .await
+    }
+
+    async fn code_host_status(&self) -> claude_commander_protocol::api::CodeHostStatus {
+        let (provider, hostname) = {
+            let config = self.config_store.read();
+            (
+                config.code_host_provider,
+                (config.code_host_provider == CodeHostProvider::Gitlab)
+                    .then(|| config.gitlab_hostname.clone())
+                    .flatten(),
+            )
+        };
+        let cli_available = self.code_host_cli_available(provider).await;
+        claude_commander_protocol::api::CodeHostStatus {
+            provider,
+            hostname,
+            cli_available,
+        }
+    }
+
+    async fn code_host_cli_available(&self, provider: CodeHostProvider) -> bool {
+        match provider {
+            CodeHostProvider::Github => self.gh_available().await,
+            CodeHostProvider::Gitlab => {
+                *self
+                    .glab_available
+                    .get_or_init(|| async { crate::git::hosting::gitlab::is_available().await })
+                    .await
+            }
+        }
     }
 
     /// Error with `NotFound` when a session id doesn't exist, so mutations can
@@ -3044,6 +3118,7 @@ pub fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
+            code_host: Default::default(),
             tmux_ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
@@ -3105,6 +3180,21 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
                 .map_or(full_name.as_str(), |(_, name)| name)
                 .to_string()
         }
+        CloneSource::Gitlab {
+            full_name,
+            hostname,
+        } => {
+            validate_hosted_repo_slug(CodeHostProvider::Gitlab, full_name)
+                .map_err(clone_source_rejected)?;
+            if let Some(hostname) = hostname {
+                validate_gitlab_hostname(hostname).map_err(clone_source_rejected)?;
+            }
+            full_name
+                .rsplit('/')
+                .next()
+                .expect("validated slug")
+                .to_string()
+        }
         CloneSource::Url { url } => {
             validate_clone_url(url)
                 .map_err(clone_source_rejected)?
@@ -3127,6 +3217,7 @@ fn clone_dir_name(req: &CloneRequest) -> Result<String> {
 fn clone_source_label(source: &CloneSource) -> &str {
     match source {
         CloneSource::Github { full_name } => full_name,
+        CloneSource::Gitlab { full_name, .. } => full_name,
         CloneSource::Url { url } => url,
     }
 }
