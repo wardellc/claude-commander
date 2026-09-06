@@ -178,7 +178,7 @@ fn merge_requests_command(repo_path: &std::path::Path, branch: &str) -> Command 
         "projects/:fullpath/merge_requests",
         "--method",
         "GET",
-        "--field",
+        "--raw-field",
         &format!("source_branch={branch}"),
         "--field",
         "state=all",
@@ -558,8 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_request_command_and_parser_match_gitlab_fields() {
-        let cmd = merge_requests_command(std::path::Path::new("/repo"), "feature");
+    fn merge_request_command_treats_branch_as_a_literal_string() {
+        // `glab api --field value=@path` reads the named local file. Branch
+        // names may legally begin with `@`, so only --raw-field is safe here.
+        let cmd = merge_requests_command(std::path::Path::new("/repo"), "@.env");
         let args = cmd
             .as_std()
             .get_args()
@@ -572,8 +574,8 @@ mod tests {
                 "projects/:fullpath/merge_requests",
                 "--method",
                 "GET",
-                "--field",
-                "source_branch=feature",
+                "--raw-field",
+                "source_branch=@.env",
                 "--field",
                 "state=all",
                 "--field",
@@ -596,7 +598,10 @@ mod tests {
                 .1,
             Some(std::ffi::OsStr::new("1"))
         );
+    }
 
+    #[test]
+    fn merge_request_parser_matches_gitlab_fields() {
         let json = r#"[
           {"iid":1,"web_url":"old","state":"merged","draft":false,"labels":[],"reviewers":[],"target_branch":"main","created_at":"2020-01-01T00:00:00Z","merged_at":"2020-01-02T00:00:00Z"},
           {"iid":2,"web_url":"new","state":"opened","work_in_progress":true,"labels":["review"],"reviewers":[{"username":"bob"},{"username":"alice"}],"target_branch":"parent","created_at":"2026-01-02T00:00:00Z"}

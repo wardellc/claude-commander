@@ -1392,16 +1392,40 @@ impl App {
             }
         }
 
+        // Provider transitions also mutate persisted session review metadata and
+        // therefore complete through the async service operation used by the
+        // real key handler. Keep this function synchronous for the many other
+        // settings and for its pure edit tests.
+        if self.config.code_host_provider != previous_provider {
+            return;
+        }
         self.persist_config();
-        if matches!(field_key, "code_host_provider" | "gitlab_hostname") {
+        if field_key == "gitlab_hostname" {
             self.spawn_backend_view_refresh(claude_commander_core::backend::LOCAL_BACKEND_ID);
         }
-        if self.config.code_host_provider != previous_provider {
-            // Persist first: the service snapshots the live config when it
-            // starts the sweep, so an earlier request could race and poll the
-            // provider that was just replaced.
-            let _ = self.service.request_pr_refresh();
+    }
+
+    /// Apply an edit and finish provider transitions through the service's
+    /// serialized cache-invalidation path.
+    async fn apply_settings_edit_live(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        let previous_provider = self.config.code_host_provider;
+        self.apply_settings_edit(tab, field_key, value);
+        if self.config.code_host_provider == previous_provider {
+            return;
         }
+
+        if let Err(error) = self
+            .service
+            .update_code_host_config(self.config.clone())
+            .await
+        {
+            self.config = self.service.read_config();
+            self.ui_state.modal = Modal::Error {
+                message: format!("Failed to change code host: {error}"),
+            };
+            return;
+        }
+        self.spawn_backend_view_refresh(claude_commander_core::backend::LOCAL_BACKEND_ID);
     }
 
     /// Set a boolean General-tab setting to a typed value and persist.
@@ -1508,7 +1532,8 @@ impl App {
                         let val = value.value().to_string();
                         let field_key = state.rows[state.selected_row].field_key.clone();
                         state.editing = None;
-                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        self.apply_settings_edit_live(state.tab, &field_key, &val)
+                            .await;
                         // Refresh rows after applying
                         state.rows = self.build_settings_rows(state.tab);
                         self.ui_state.modal = Modal::Settings(state);
@@ -1551,7 +1576,8 @@ impl App {
                         };
                         state.editing = None;
                         let prev_input_device = self.config.stt.input_device.clone();
-                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        self.apply_settings_edit_live(state.tab, &field_key, &val)
+                            .await;
                         // Selecting a *different* microphone rebuilds the running
                         // listener so the new device is used on the next recording,
                         // live. Skip the respawn when the id is unchanged (e.g.

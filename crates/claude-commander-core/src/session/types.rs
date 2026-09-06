@@ -357,6 +357,21 @@ impl WorktreeSession {
             .map_or(self.created_at, |adopted| adopted.max(self.created_at))
     }
 
+    /// Clear every field populated by hosted pull/merge-request polling.
+    /// Provider changes use this as one operation so metadata discovered by one
+    /// CLI can never be interpreted or mutated through another provider.
+    pub(crate) fn clear_review_metadata(&mut self) {
+        self.pr_number = None;
+        self.pr_url = None;
+        self.pr_state = None;
+        self.pr_draft = false;
+        self.pr_labels.clear();
+        self.pr_merged = false;
+        self.review_decision = None;
+        self.pr_reviewers.clear();
+        self.pr_base_branch = None;
+    }
+
     /// True when the session's PR is merged on GitHub. Honours the legacy
     /// `pr_merged` flag for state.json files written before `pr_state` existed.
     pub fn pr_is_merged(&self) -> bool {

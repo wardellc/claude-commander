@@ -26,7 +26,7 @@ use crate::comment::{
     decide_send, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
-use crate::error::{GitError, Result, SessionError};
+use crate::error::{ConfigError, GitError, Result, SessionError};
 use crate::git::{
     CloneJobs, CloneOutcome, ComposedDiff, FileDiff, GitBackend, PrCheckResult,
     clone_source_rejected, compose_review_diff, compute_branch_diff, diff_stat_summary,
@@ -92,6 +92,10 @@ pub struct CommanderService {
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// Signals the PR-status loop to run an immediate check (manual refresh).
     pr_refresh: Arc<tokio::sync::Notify>,
+    /// Serializes provider transitions with application of review-poll results.
+    /// A poll that began under the old provider must either finish before its
+    /// metadata is cleared or observe the new provider and be discarded.
+    review_provider_lock: Arc<tokio::sync::Mutex<()>>,
     /// Idempotency guard for [`Self::spawn_background_tasks`]: the loops spawn
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
@@ -171,6 +175,7 @@ impl CommanderService {
             pull_status: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             last_pr_check: Arc::new(std::sync::Mutex::new(None)),
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
+            review_provider_lock: Arc::new(tokio::sync::Mutex::new(())),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
             clone_jobs: CloneJobs::new(),
@@ -224,7 +229,30 @@ impl CommanderService {
     /// Overwrite the persisted config (updates mtime so the hot-reload watcher
     /// won't re-read our own write).
     pub fn update_config(&self, config: Config) -> Result<()> {
+        if config.code_host_provider != self.config_store.read().code_host_provider {
+            return Err(ConfigError::InvalidValue {
+                key: "code_host_provider".into(),
+                reason: "provider changes must use update_code_host_config".into(),
+            }
+            .into());
+        }
         self.config_store.mutate(|c| *c = config)
+    }
+
+    /// Persist a config whose code-host provider changed and invalidate all
+    /// review metadata before the new provider can consume it. The shared lock
+    /// also fences in-flight poll results from the previous provider.
+    pub async fn update_code_host_config(&self, config: Config) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        let old_provider = self.config_store.read().code_host_provider;
+        if config.code_host_provider == old_provider {
+            return self.config_store.mutate(|current| *current = config);
+        }
+
+        self.invalidate_review_metadata(&config).await?;
+        self.config_store.mutate(|current| *current = config)?;
+        self.pr_refresh.notify_one();
+        Ok(())
     }
 
     /// Rename a configured section, migrating every session that refers to it
@@ -280,8 +308,29 @@ impl CommanderService {
     }
 
     /// Reload config from disk if the file changed since the last read.
-    pub fn reload_config(&self) -> Result<bool> {
-        self.config_store.reload_if_changed()
+    pub async fn reload_config(&self) -> Result<bool> {
+        let _guard = self.review_provider_lock.lock().await;
+        let old_provider = self.config_store.read().code_host_provider;
+        let reloaded = self.config_store.reload_if_changed()?;
+        let new_config = self.config_store.read().clone();
+        if reloaded && new_config.code_host_provider != old_provider {
+            self.invalidate_review_metadata(&new_config).await?;
+            self.pr_refresh.notify_one();
+        }
+        Ok(reloaded)
+    }
+
+    async fn invalidate_review_metadata(&self, config: &Config) -> Result<()> {
+        let sections = crate::session::effective_sections(&config.sections).into_owned();
+        let now = Utc::now();
+        self.store
+            .mutate(move |state| {
+                for session in state.sessions.values_mut() {
+                    session.clear_review_metadata();
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await
     }
 
     /// Whether a pending config change requires an app restart to take effect.
@@ -1151,6 +1200,23 @@ impl CommanderService {
     /// authoritatively clears them, `FetchFailed` preserves cached state so a
     /// transient error doesn't flatten a PR stack in the UI.
     pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
+        let provider = self.config_store.read().code_host_provider;
+        self.apply_pr_results_for_provider(provider, results).await
+    }
+
+    /// Apply results only while their provider snapshot is still current. The
+    /// provider-transition lock spans both the check and persisted mutation, so
+    /// a switch cannot clear the cache and then be overwritten by an older
+    /// in-flight sweep.
+    async fn apply_pr_results_for_provider(
+        &self,
+        provider: CodeHostProvider,
+        results: Vec<(SessionId, PrCheckResult)>,
+    ) -> Result<()> {
+        let _guard = self.review_provider_lock.lock().await;
+        if self.config_store.read().code_host_provider != provider {
+            return Ok(());
+        }
         let sections =
             crate::session::effective_sections(&self.config_store.read().sections).into_owned();
         let now = chrono::Utc::now();
@@ -1173,15 +1239,7 @@ impl CommanderService {
                             session.pr_base_branch = info.base_ref_name.clone();
                         }
                         PrCheckResult::NotFound => {
-                            session.pr_number = None;
-                            session.pr_url = None;
-                            session.pr_state = None;
-                            session.pr_draft = false;
-                            session.pr_labels.clear();
-                            session.pr_merged = false;
-                            session.review_decision = None;
-                            session.pr_reviewers.clear();
-                            session.pr_base_branch = None;
+                            session.clear_review_metadata();
                         }
                         PrCheckResult::FetchFailed => {}
                     }
@@ -1274,6 +1332,7 @@ impl CommanderService {
 
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.telemetry.feature("session.delete");
+        let _guard = self.review_provider_lock.lock().await;
         self.manager.delete_session(id).await
     }
 
@@ -1906,6 +1965,7 @@ impl CommanderService {
         parent: Option<SessionId>,
     ) -> Result<SetSessionBaseOutcome> {
         self.telemetry.feature("session.set_base");
+        let _guard = self.review_provider_lock.lock().await;
         // Keep one provider for the whole operation even if config hot-reloads
         // while the state mutation is in flight.
         let provider = self.config_store.read().code_host_provider;
@@ -2369,7 +2429,10 @@ impl CommanderService {
                     .buffer_unordered(PR_FANOUT_CONCURRENCY)
                     .collect()
                     .await;
-                if let Err(e) = service.apply_pr_results(results).await {
+                if let Err(e) = service
+                    .apply_pr_results_for_provider(provider, results)
+                    .await
+                {
                     debug!("apply_pr_results failed: {e}");
                 }
             }
@@ -4496,6 +4559,61 @@ mod tests {
         let s = state.get_session(&sid).unwrap();
         assert!(s.pr_number.is_none());
         assert!(s.pr_base_branch.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_change_clears_reviews_and_rejects_old_in_flight_results() {
+        use crate::git::{PrCheckResult, PrInfo, PrState};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let review = |number| {
+            PrCheckResult::Found(PrInfo {
+                number,
+                url: format!("https://github.example/pr/{number}"),
+                state: PrState::Open,
+                is_draft: true,
+                labels: vec!["review".into()],
+                review_decision: Some(crate::git::ReviewDecision::Approved),
+                reviewers: vec!["alice".into()],
+                base_ref_name: Some("parent".into()),
+            })
+        };
+
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(42))])
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.store()
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .pr_number,
+            Some(42)
+        );
+
+        let mut config = svc.read_config();
+        config.code_host_provider = CodeHostProvider::Gitlab;
+        svc.update_code_host_config(config).await.unwrap();
+
+        // Simulate the GitHub sweep that was already in flight when the user
+        // switched. It must not repopulate fields after invalidation.
+        svc.apply_pr_results_for_provider(CodeHostProvider::Github, vec![(sid, review(99))])
+            .await
+            .unwrap();
+        let state = svc.store().read().await;
+        let session = state.get_session(&sid).unwrap();
+        assert!(session.pr_number.is_none());
+        assert!(session.pr_url.is_none());
+        assert!(session.pr_state.is_none());
+        assert!(!session.pr_draft);
+        assert!(session.pr_labels.is_empty());
+        assert!(!session.pr_merged);
+        assert!(session.review_decision.is_none());
+        assert!(session.pr_reviewers.is_empty());
+        assert!(session.pr_base_branch.is_none());
     }
 
     /// Run `git` in `dir`, panicking on failure. GPG signing is forced off so

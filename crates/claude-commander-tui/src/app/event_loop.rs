@@ -113,7 +113,7 @@ impl App {
                 // Check for config file changes roughly once per second
                 // (tick_count wraps at u64::MAX, is_multiple_of(30) at 30fps ≈ 1s)
                 if self.ui_state.tick_count.is_multiple_of(30) {
-                    self.check_config_reload();
+                    self.check_config_reload().await;
                 }
                 return true;
             }
@@ -125,8 +125,8 @@ impl App {
     }
 
     /// Check if `config.toml` has been modified externally and refresh the local cache.
-    pub(super) fn check_config_reload(&mut self) {
-        match self.service.reload_config() {
+    pub(super) async fn check_config_reload(&mut self) {
+        match self.service.reload_config().await {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
                 let old_servers = self.config.remote_servers.clone();
