@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
+            StateUpdate::ConfigReloaded { result } => self.apply_config_reload(result),
             StateUpdate::BackendChanged {
                 backend_id,
                 snapshot,

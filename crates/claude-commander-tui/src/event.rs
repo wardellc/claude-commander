@@ -77,6 +77,8 @@ impl RestartKind {
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
+    /// Periodic config reload completed without holding up input/rendering.
+    ConfigReloaded { result: Result<bool, String> },
     /// Session content updated
     ContentUpdated {
         session_id: SessionId,

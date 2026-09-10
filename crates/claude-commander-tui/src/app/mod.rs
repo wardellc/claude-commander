@@ -1636,7 +1636,8 @@ pub struct AppUiState {
     /// Whether the previous frame was a full-screen modal takeover
     /// (ReviewDiff/Conversation). A true→false transition triggers a `Clear`.
     pub prev_fullscreen: bool,
-    /// Whether the `gh` CLI is available
+    /// Config reload is waiting on the service; ticks must not enqueue more.
+    pub config_reload_in_flight: bool,
     /// When the last enriched-PR fetch was spawned (None = not in flight).
     /// Guards `spawn_info_fetch` against double-spawns: `update_selection` now
     /// runs it every tick (via `refresh_list_items`), so without this an open
@@ -1766,6 +1767,7 @@ impl Default for AppUiState {
             shell_toggle_pair: None,
             force_clear: false,
             prev_fullscreen: false,
+            config_reload_in_flight: false,
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
             terminal_size: Rect::default(),

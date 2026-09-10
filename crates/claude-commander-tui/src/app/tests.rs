@@ -669,6 +669,81 @@ fn make_test_app() -> App {
     make_test_app_with_path().0
 }
 
+#[tokio::test]
+async fn config_reload_does_not_wait_for_review_poll_on_ui_task() {
+    let mut app = make_test_app();
+    let service = app.service.clone();
+    let state = service.store().read().await;
+    let poll = service.apply_pr_results(Vec::new());
+    tokio::pin!(poll);
+    // Poll once to acquire the provider mutex. The retained state reader
+    // prevents the review update from finishing and releasing that mutex.
+    assert!(futures::poll!(&mut poll).is_pending());
+
+    app.ui_state.tick_count = 29;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        app.process_event(AppEvent::Tick),
+    )
+    .await;
+    if result.is_ok() {
+        assert!(app.ui_state.config_reload_in_flight);
+        // More polling opportunities while the provider mutex is busy must
+        // leave a single reload queued, rather than one task per second.
+        for _ in 0..3 {
+            app.check_config_reload();
+        }
+    }
+    drop(state);
+    poll.await.unwrap();
+    assert!(result.is_ok(), "config polling blocked the UI task");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result: Ok(false) })
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), app.event_loop.next(),)
+            .await
+            .is_err(),
+        "busy ticks queued duplicate reloads"
+    );
+    app.process_event(event).await;
+    assert!(!app.ui_state.config_reload_in_flight);
+}
+
+#[tokio::test]
+async fn config_reload_recovers_from_error_and_applies_external_edits() {
+    let (mut app, path) = make_test_app_with_path();
+    let original_prefix = app.config.branch_prefix.clone();
+    for (contents, expected_prefix) in [
+        ("invalid = [", original_prefix.as_str()),
+        ("branch_prefix = 'reloaded/'", "reloaded/"),
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        app.check_config_reload();
+        assert!(app.ui_state.config_reload_in_flight);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result }) = &event else {
+            panic!("expected config reload completion, got {event:?}");
+        };
+        if contents == "invalid = [" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result, &Ok(true));
+        }
+        app.process_event(event).await;
+        assert!(!app.ui_state.config_reload_in_flight);
+        assert_eq!(app.config.branch_prefix, expected_prefix);
+    }
+}
+
 /// Stand-in for the CLI reference the binary injects into `App::new`. The real
 /// one is rendered from the clap tree in the `claude-commander` crate; core only
 /// ever passes the markdown through to a `CLAUDE.md`.
