@@ -217,7 +217,12 @@ impl App {
             .backend(sref.backend)
             .map(|h| h.backend.descriptor().kind)
             .unwrap_or(claude_commander_core::backend::BackendKind::Local);
-        if should_fetch_enriched_pr(needs_enriched, self.ui_state.gh_available, backend_kind)
+        let code_host = self
+            .view_for(sref.backend)
+            .snapshot
+            .server
+            .effective_code_host();
+        if should_fetch_enriched_pr(needs_enriched, code_host.cli_available, backend_kind)
             && !in_flight
         {
             // Resolve the project's repo path from the cached snapshot rather
@@ -233,9 +238,13 @@ impl App {
             let spawned_at = Instant::now();
             self.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
 
+            let provider = code_host.provider;
             tokio::spawn(async move {
                 let info = if let Some(repo_path) = repo_path {
-                    fetch_enriched_pr(&repo_path, pr_number).await
+                    claude_commander_core::git::hosting::fetch_enriched_review(
+                        provider, &repo_path, pr_number,
+                    )
+                    .await
                 } else {
                     None
                 };
@@ -420,11 +429,11 @@ pub(super) async fn fetch_preview_data(
 /// the gate is unit-testable without a live backend.
 fn should_fetch_enriched_pr(
     needs_enriched: bool,
-    gh_available: bool,
+    cli_available: bool,
     backend_kind: claude_commander_core::backend::BackendKind,
 ) -> bool {
     needs_enriched
-        && gh_available
+        && cli_available
         && backend_kind == claude_commander_core::backend::BackendKind::Local
 }
 

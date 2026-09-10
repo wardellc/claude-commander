@@ -31,10 +31,12 @@ use axum::{
 use claude_commander_core::Config;
 use claude_commander_core::api::SetProgramsRequest;
 use claude_commander_core::error::SessionError;
-use serde::Deserialize;
+use claude_commander_protocol::hosting::{CodeHostProvider, validate_gitlab_hostname};
+use serde::{Deserialize, Deserializer};
 use serde_json::json;
 
 use crate::error::ApiError;
+use crate::extract::SafeJson;
 use crate::state::AppState;
 
 /// `GET /config` → `read_config`, with credential fields cleared: the caller
@@ -60,6 +62,8 @@ pub async fn read(State(state): State<AppState>) -> Json<Config> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConfigPatch {
+    pub code_host_provider: Option<CodeHostProvider>,
+    pub gitlab_hostname: NullablePatch<String>,
     pub branch_prefix: Option<String>,
     pub max_concurrent_tmux: Option<usize>,
     pub capture_cache_ttl_ms: Option<u64>,
@@ -79,7 +83,30 @@ pub struct ConfigPatch {
     pub ai_summary_enabled: Option<bool>,
     pub rounded_borders: Option<bool>,
     pub precompute_review_caches: Option<bool>,
-    pub in_progress_limit: Option<Option<u32>>,
+    pub in_progress_limit: NullablePatch<u32>,
+}
+
+/// Three-state PATCH field: absent leaves the current value untouched, JSON
+/// `null` clears it, and a value replaces it. `Option<Option<T>>` cannot express
+/// this with ordinary Serde because both absent and null deserialize to the
+/// outer `None`.
+#[derive(Debug, Default)]
+pub enum NullablePatch<T> {
+    #[default]
+    Missing,
+    Present(Option<T>),
+}
+
+impl<'de, T> Deserialize<'de> for NullablePatch<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Self::Present)
+    }
 }
 
 impl ConfigPatch {
@@ -93,6 +120,10 @@ impl ConfigPatch {
             };
         }
         set!(branch_prefix);
+        set!(code_host_provider);
+        if let NullablePatch::Present(value) = self.gitlab_hostname {
+            cfg.gitlab_hostname = value;
+        }
         set!(max_concurrent_tmux);
         set!(capture_cache_ttl_ms);
         set!(diff_cache_ttl_ms);
@@ -111,7 +142,9 @@ impl ConfigPatch {
         set!(ai_summary_enabled);
         set!(rounded_borders);
         set!(precompute_review_caches);
-        set!(in_progress_limit);
+        if let NullablePatch::Present(value) = self.in_progress_limit {
+            cfg.in_progress_limit = value;
+        }
     }
 }
 
@@ -134,6 +167,10 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
     if cfg.max_concurrent_tmux == 0 {
         return Err(invalid("max_concurrent_tmux", "must be greater than zero"));
     }
+    if let Some(hostname) = cfg.gitlab_hostname.as_deref() {
+        validate_gitlab_hostname(hostname)
+            .map_err(|reason| invalid("gitlab_hostname", &reason.to_string()))?;
+    }
     Ok(())
 }
 
@@ -144,12 +181,18 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
 /// they cannot be changed here.
 pub async fn update(
     State(state): State<AppState>,
-    Json(patch): Json<ConfigPatch>,
+    SafeJson(patch): SafeJson<ConfigPatch>,
 ) -> Result<StatusCode, ApiError> {
-    let mut merged = state.service.read_config();
+    let current = state.service.read_config();
+    let old_provider = current.code_host_provider;
+    let mut merged = current;
     patch.apply_to(&mut merged);
     validate(&merged)?;
-    state.service.update_config(merged)?;
+    if merged.code_host_provider != old_provider {
+        state.service.update_code_host_config(merged).await?;
+    } else {
+        state.service.update_config(merged)?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -170,7 +213,7 @@ pub async fn put_programs(
 /// `POST /config/reload` → `reload_config` → `{ "reloaded": bool }`
 /// (true when the on-disk config differed and was re-read).
 pub async fn reload(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let reloaded = state.service.reload_config()?;
+    let reloaded = state.service.reload_config().await?;
     Ok(Json(json!({ "reloaded": reloaded })).into_response())
 }
 
@@ -280,6 +323,89 @@ mod tests {
         assert_eq!(after.ui_refresh_fps, 45);
         // An untouched field keeps its prior value.
         assert_eq!(after.worktrees_dir, before.worktrees_dir);
+    }
+
+    #[tokio::test]
+    async fn patch_updates_code_host_and_rejects_unsafe_gitlab_hostname() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({
+                "code_host_provider": "gitlab",
+                "gitlab_hostname": "gitlab.example.com:8443"
+            }),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let config = state.service.read_config();
+        assert_eq!(
+            config.code_host_provider,
+            claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+        );
+        assert_eq!(
+            config.gitlab_hostname.as_deref(),
+            Some("gitlab.example.com:8443")
+        );
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({
+                "gitlab_hostname": "https://user:secret@gitlab.example.com/group"
+            }),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            state.service.read_config().gitlab_hostname.as_deref(),
+            Some("gitlab.example.com:8443")
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_distinguishes_an_omitted_hostname_from_explicit_null() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let mut config = state.service.read_config();
+        config.gitlab_hostname = Some("gitlab.example.com".into());
+        state.service.update_config(config).unwrap();
+
+        let status = patch(state.clone(), serde_json::json!({})).await;
+        assert_eq!(status, 204);
+        assert_eq!(
+            state.service.read_config().gitlab_hostname.as_deref(),
+            Some("gitlab.example.com"),
+            "an omitted PATCH field must leave the hostname untouched"
+        );
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({ "gitlab_hostname": null }),
+        )
+        .await;
+        assert_eq!(status, 204);
+        assert_eq!(
+            state.service.read_config().gitlab_hostname,
+            None,
+            "an explicit null must clear the hostname override"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_gitlab_hostname_shape_never_echoes_a_credential() {
+        let dir = TempDir::new().unwrap();
+        let secret = "glpat-secret-value";
+        let req = Request::patch("/config")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"gitlab_hostname":["https://user:{secret}@gitlab.example.com"]}}"#
+            )))
+            .unwrap();
+        let (status, body) = send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
+        let body = String::from_utf8(body).unwrap();
+        assert!(!body.contains(secret), "credential leaked: {body}");
     }
 
     /// A sensitive path field cannot be changed: `deny_unknown_fields` rejects a

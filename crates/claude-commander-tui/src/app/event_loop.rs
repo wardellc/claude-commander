@@ -126,7 +126,28 @@ impl App {
 
     /// Check if `config.toml` has been modified externally and refresh the local cache.
     pub(super) fn check_config_reload(&mut self) {
-        match self.service.reload_config() {
+        if self.ui_state.config_reload_in_flight {
+            return;
+        }
+        self.ui_state.config_reload_in_flight = true;
+        let service = self.service.clone();
+        let tx = self.event_loop.sender();
+        // reload_config takes the provider-transition lock, which review polls,
+        // deletion and retargeting can hold across slow I/O. Awaiting it on a
+        // tick would stop input and rendering even when config is unchanged.
+        tokio::spawn(async move {
+            let result = service.reload_config().await.map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ConfigReloaded {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) fn apply_config_reload(&mut self, result: std::result::Result<bool, String>) {
+        self.ui_state.config_reload_in_flight = false;
+        match result {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
                 let old_servers = self.config.remote_servers.clone();

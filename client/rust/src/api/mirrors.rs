@@ -17,8 +17,8 @@ use flutter_rust_bridge::frb;
 use uuid::Uuid;
 
 pub use claude_commander_protocol::api::{
-    BranchInfo, CreateOptions, OperationKind, ProgramInfo, PullBlockReason, ServerStatus,
-    SessionDetail, SessionInfo,
+    BranchInfo, CodeHostStatus, CreateOptions, OperationKind, ProgramInfo, PullBlockReason,
+    ServerStatus, SessionDetail, SessionInfo,
 };
 pub use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
@@ -30,7 +30,11 @@ use claude_commander_protocol::api::{
     PullStatus, WorkspaceSnapshot,
 };
 use claude_commander_protocol::connection::ConnectionState;
-use claude_commander_protocol::github::{CloneJob, CloneRequest, CloneSource, CloneStatus};
+use claude_commander_protocol::github::{CloneJob, CloneRequest, CloneStatus};
+pub use claude_commander_protocol::hosting::{
+    CodeHost, CodeHostProvider, HostedRepository, RepositoryListing, RepositoryVisibility,
+};
+use claude_commander_protocol::hosting::CloneSource;
 
 // All three id newtypes are a single `Uuid`, so one mirror covers them all.
 #[frb(mirror(SessionId, ProjectId, CloneJobId))]
@@ -123,8 +127,22 @@ pub struct _SessionDetail {
 #[frb(mirror(ServerStatus))]
 pub struct _ServerStatus {
     pub gh_available: bool,
+    pub code_host: CodeHostStatus,
     pub tmux_ok: bool,
     pub version: String,
+}
+
+#[frb(mirror(CodeHostStatus))]
+pub struct _CodeHostStatus {
+    pub provider: CodeHostProvider,
+    pub hostname: Option<String>,
+    pub cli_available: bool,
+}
+
+#[frb(mirror(CodeHostProvider))]
+pub enum _CodeHostProvider {
+    Github,
+    Gitlab,
 }
 
 /// A launch program option. Mirrored (not a DTO) so it can also be *constructed*
@@ -472,10 +490,45 @@ pub struct _GithubRepo {
     pub pushed_at: Option<DateTime<Utc>>,
 }
 
+#[frb(mirror(CodeHost))]
+pub struct _CodeHost {
+    pub provider: CodeHostProvider,
+    pub hostname: Option<String>,
+}
+
+#[frb(mirror(RepositoryVisibility))]
+pub enum _RepositoryVisibility {
+    Public,
+    Internal,
+    Private,
+}
+
+#[frb(mirror(HostedRepository))]
+pub struct _HostedRepository {
+    pub full_name: String,
+    pub namespace: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub visibility: RepositoryVisibility,
+    pub fork: bool,
+    pub archived: bool,
+    pub default_branch: Option<String>,
+    pub clone_url: String,
+    pub ssh_url: String,
+    pub activity_at: Option<DateTime<Utc>>,
+}
+
+#[frb(mirror(RepositoryListing))]
+pub struct _RepositoryListing {
+    pub host: CodeHost,
+    pub repositories: Vec<HostedRepository>,
+}
+
 /// Which kind of [`CloneSourceDto`] this is (flattens the data-carrying
 /// [`CloneSource`]).
 pub enum CloneSourceKind {
     Github,
+    Gitlab,
     Url,
 }
 
@@ -488,12 +541,17 @@ pub enum CloneSourceKind {
 pub struct CloneSourceDto {
     pub kind: CloneSourceKind,
     pub value: String,
+    pub hostname: Option<String>,
 }
 
 impl From<CloneSourceDto> for CloneSource {
     fn from(s: CloneSourceDto) -> Self {
         match s.kind {
             CloneSourceKind::Github => CloneSource::Github { full_name: s.value },
+            CloneSourceKind::Gitlab => CloneSource::Gitlab {
+                full_name: s.value,
+                hostname: s.hostname,
+            },
             CloneSourceKind::Url => CloneSource::Url { url: s.value },
         }
     }
@@ -659,6 +717,7 @@ mod tests {
             }],
             server: ServerStatus {
                 gh_available: true,
+                code_host: Default::default(),
                 tmux_ok: true,
                 version: "0.0.0".into(),
             },
@@ -783,6 +842,7 @@ mod tests {
             source: CloneSourceDto {
                 kind: CloneSourceKind::Github,
                 value: "sizeak/claude-commander".into(),
+                hostname: None,
             },
             dest_name: None,
         }
@@ -795,10 +855,28 @@ mod tests {
         );
         assert_eq!(github.dest_name, None);
 
+        let gitlab: CloneRequest = CloneRequestDto {
+            source: CloneSourceDto {
+                kind: CloneSourceKind::Gitlab,
+                value: "group/sub/project".into(),
+                hostname: Some("gitlab.example.com".into()),
+            },
+            dest_name: None,
+        }
+        .into();
+        assert_eq!(
+            gitlab.source,
+            CloneSource::Gitlab {
+                full_name: "group/sub/project".into(),
+                hostname: Some("gitlab.example.com".into()),
+            }
+        );
+
         let url: CloneRequest = CloneRequestDto {
             source: CloneSourceDto {
                 kind: CloneSourceKind::Url,
                 value: "https://github.com/sizeak/claude-commander.git".into(),
+                hostname: None,
             },
             dest_name: Some("cc".into()),
         }

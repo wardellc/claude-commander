@@ -545,6 +545,7 @@ fn test_info_view_renders_stack_chain() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -598,6 +599,7 @@ fn test_info_view_stack_section_renders_above_pr_section() {
         pr_number: Some(7),
         pr_url: Some("https://example.com/pr/7".into()),
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -638,6 +640,7 @@ fn test_info_view_no_stack_section_for_unstacked() {
         pr_number: None,
         pr_url: None,
         pr_merged: false,
+        review_label: "PR",
         enriched_pr: None,
         ai_summary: None,
         summary_key_hint: None,
@@ -664,6 +667,81 @@ use claude_commander_core::config::{AppState, ConfigStore, StateStore};
 
 fn make_test_app() -> App {
     make_test_app_with_path().0
+}
+
+#[tokio::test]
+async fn config_reload_does_not_wait_for_review_poll_on_ui_task() {
+    let mut app = make_test_app();
+    let service = app.service.clone();
+    let state = service.store().read().await;
+    let poll = service.apply_pr_results(Vec::new());
+    tokio::pin!(poll);
+    // Poll once to acquire the provider mutex. The retained state reader
+    // prevents the review update from finishing and releasing that mutex.
+    assert!(futures::poll!(&mut poll).is_pending());
+
+    app.ui_state.tick_count = 29;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        app.process_event(AppEvent::Tick),
+    )
+    .await;
+    if result.is_ok() {
+        assert!(app.ui_state.config_reload_in_flight);
+        // More polling opportunities while the provider mutex is busy must
+        // leave a single reload queued, rather than one task per second.
+        for _ in 0..3 {
+            app.check_config_reload();
+        }
+    }
+    drop(state);
+    poll.await.unwrap();
+    assert!(result.is_ok(), "config polling blocked the UI task");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result: Ok(false) })
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), app.event_loop.next(),)
+            .await
+            .is_err(),
+        "busy ticks queued duplicate reloads"
+    );
+    app.process_event(event).await;
+    assert!(!app.ui_state.config_reload_in_flight);
+}
+
+#[tokio::test]
+async fn config_reload_recovers_from_error_and_applies_external_edits() {
+    let (mut app, path) = make_test_app_with_path();
+    let original_prefix = app.config.branch_prefix.clone();
+    for (contents, expected_prefix) in [
+        ("invalid = [", original_prefix.as_str()),
+        ("branch_prefix = 'reloaded/'", "reloaded/"),
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        app.check_config_reload();
+        assert!(app.ui_state.config_reload_in_flight);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), app.event_loop.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let AppEvent::StateUpdate(StateUpdate::ConfigReloaded { result }) = &event else {
+            panic!("expected config reload completion, got {event:?}");
+        };
+        if contents == "invalid = [" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result, &Ok(true));
+        }
+        app.process_event(event).await;
+        assert!(!app.ui_state.config_reload_in_flight);
+        assert_eq!(app.config.branch_prefix, expected_prefix);
+    }
 }
 
 /// Stand-in for the CLI reference the binary injects into `App::new`. The real
@@ -886,6 +964,25 @@ fn test_apply_repo_list_timeout_rejects_implausibly_short_values() {
             app.config.repo_list_timeout_secs, 600,
             "{rejected} should not have been accepted"
         );
+    }
+}
+
+#[test]
+fn gitlab_hostname_editor_rejects_url_and_credentials_without_persisting_them() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(
+        SettingsTab::General,
+        "gitlab_hostname",
+        "https://user:secret@gitlab.example.com/group",
+    );
+
+    assert!(app.config.gitlab_hostname.is_none());
+    match &app.ui_state.modal {
+        Modal::Error { message } => {
+            assert!(message.contains("Invalid GitLab hostname"));
+            assert!(!message.contains("secret"));
+        }
+        other => panic!("expected validation error, got {other:?}"),
     }
 }
 
@@ -5803,7 +5900,11 @@ fn set_session_base_is_reachable_from_the_command_palette() {
 /// user has to be told the PR and review diff will be wrong until they do.
 #[test]
 fn set_session_base_confirm_message_warns_that_rebasing_is_manual() {
-    let msg = super::actions::set_session_base_confirm_message("my-task", "other-br");
+    let msg = super::actions::set_session_base_confirm_message(
+        claude_commander_protocol::hosting::CodeHostProvider::Github,
+        "my-task",
+        "other-br",
+    );
     assert!(msg.contains("my-task"));
     assert!(msg.contains("other-br"));
     assert!(
@@ -6647,7 +6748,6 @@ async fn spawn_info_fetch_is_noop_while_enriched_fetch_in_flight() {
     // Arrange the conditions under which the fetch would fire: Info modal open,
     // this session selected, `gh` available, and no cached enriched PR yet.
     app.ui_state.selected_session_id = Some(claude_commander_core::backend::SessionRef::local(sid));
-    app.ui_state.gh_available = true;
     app.ui_state.modal = Modal::Info { scroll: 0 };
     app.ui_state.enriched_pr = None;
 
@@ -8042,8 +8142,10 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     let mut app = make_test_app();
     app.ui_state.selected_session_id = Some(SessionRef::local(sid));
 
+    let spawned_at = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
     app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: Instant::now(),
+        spawned_at,
         session_id: sid,
         info: None,
     })
@@ -8141,6 +8243,10 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
         Some(guard),
         "a superseded enriched result must leave the live fetch's guard intact"
     );
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "a superseded provider-bound result must not update negative caches"
+    );
 
     app.handle_state_update(StateUpdate::EnrichedPrReady {
         spawned_at: guard,
@@ -8155,9 +8261,8 @@ async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
 // Clone repository: palette command, repo picker, and clone-job progress
 // ---------------------------------------------------------------------------
 
-use claude_commander_protocol::github::{
-    CloneJob, CloneJobId, CloneSource, CloneStatus, GithubRepo,
-};
+use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneStatus, GithubRepo};
+use claude_commander_protocol::hosting::CloneSource;
 
 /// A `GithubRepo` with just the fields the picker reads; the rest are plausible
 /// constants so a test can build a list without restating the whole DTO.
@@ -8180,10 +8285,10 @@ fn github_repo(full_name: &str) -> GithubRepo {
 
 /// The labels of the repo-picker rows the palette would show for `query`.
 fn repo_picker_labels(app: &App, query: &str) -> Vec<String> {
-    app.gather_github_repo_picker_items(query)
+    app.gather_repository_picker_items(query)
         .into_iter()
         .map(|item| match item {
-            QuickSwitchItem::GithubRepo { label, .. } => label,
+            QuickSwitchItem::HostedRepository { label, .. } => label,
             other => panic!("expected a GithubRepo row, got {other:?}"),
         })
         .collect()
@@ -8221,7 +8326,7 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -8229,9 +8334,9 @@ async fn repo_picker_filter_narrows_to_matching_repos() {
     );
 
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
-        github_repo("other/commander-docs"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
+        github_repo("other/commander-docs").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -8276,8 +8381,8 @@ async fn repo_picker_marks_repos_already_registered_as_projects() {
 
     app.handle_command(UserCommand::CloneRepository).await;
     app.ui_state.repo_picker.repos = vec![
-        github_repo("sizeak/claude-commander"),
-        github_repo("sizeak/diffgrid"),
+        github_repo("sizeak/claude-commander").into(),
+        github_repo("sizeak/diffgrid").into(),
     ];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
 
@@ -8302,7 +8407,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
     app.handle_command(UserCommand::CloneRepository).await;
     let generation = app.ui_state.repo_picker.generation;
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation,
         result: Err("gh: command not found".to_string()),
@@ -8313,7 +8418,7 @@ async fn a_failed_repo_list_is_shown_as_a_state_and_keeps_the_url_path_usable() 
         matches!(
             app.ui_state.modal,
             Modal::QuickSwitch {
-                mode: PaletteMode::GithubRepoPicker,
+                mode: PaletteMode::RepositoryPicker,
                 ..
             }
         ),
@@ -8338,13 +8443,19 @@ async fn a_stale_repo_listing_is_dropped() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
     let stale = app.ui_state.repo_picker.generation;
-    app.refetch_github_repos();
+    app.refetch_repositories();
     assert_ne!(app.ui_state.repo_picker.generation, stale);
 
-    app.handle_state_update(StateUpdate::GithubReposLoaded {
+    app.handle_state_update(StateUpdate::RepositoriesLoaded {
         backend_id: claude_commander_core::backend::LOCAL_BACKEND_ID.0,
         generation: stale,
-        result: Ok(vec![github_repo("stale/repo")]),
+        result: Ok(claude_commander_protocol::hosting::RepositoryListing {
+            host: claude_commander_protocol::hosting::CodeHost {
+                provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
+                hostname: None,
+            },
+            repositories: vec![github_repo("stale/repo").into()],
+        }),
     })
     .await;
     assert!(
@@ -8355,10 +8466,32 @@ async fn a_stale_repo_listing_is_dropped() {
 }
 
 #[tokio::test]
+async fn gitlab_picker_knows_its_provider_before_an_empty_listing_arrives() {
+    let mut app = make_test_app();
+    app.backends[0].view.snapshot.server.code_host =
+        claude_commander_protocol::api::CodeHostStatus {
+            provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+            hostname: Some("gitlab.example.com".into()),
+            cli_available: true,
+        };
+
+    app.handle_command(UserCommand::CloneRepository).await;
+
+    assert_eq!(
+        app.ui_state.repo_picker.host.provider,
+        claude_commander_protocol::hosting::CodeHostProvider::Gitlab
+    );
+    assert_eq!(
+        app.ui_state.repo_picker.host.hostname.as_deref(),
+        Some("gitlab.example.com")
+    );
+}
+
+#[tokio::test]
 async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_repo_name() {
     let mut app = make_test_app();
     app.handle_command(UserCommand::CloneRepository).await;
-    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander")];
+    app.ui_state.repo_picker.repos = vec![github_repo("sizeak/claude-commander").into()];
     app.ui_state.repo_picker.fetch = RepoFetch::Ready;
     app.refilter_quick_switch();
 
@@ -8385,6 +8518,40 @@ async fn enter_on_a_repo_opens_an_editable_destination_name_prefilled_with_the_r
         }
         other => panic!("expected the destination-name input, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn gitlab_repo_selection_freezes_provider_and_hostname_into_clone_source() {
+    let mut app = make_test_app();
+    app.handle_command(UserCommand::CloneRepository).await;
+    app.ui_state.repo_picker.host = claude_commander_protocol::hosting::CodeHost {
+        provider: claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+        hostname: Some("gitlab.example.com".into()),
+    };
+    let mut repo: claude_commander_protocol::hosting::HostedRepository =
+        github_repo("group/subgroup/project").into();
+    repo.namespace = "group/subgroup".into();
+    repo.name = "project".into();
+    app.ui_state.repo_picker.repos = vec![repo];
+    app.ui_state.repo_picker.fetch = RepoFetch::Ready;
+    app.refilter_quick_switch();
+
+    app.activate_quick_switch_selection().await;
+
+    let Modal::Input {
+        on_submit: InputAction::CloneDestName { source, .. },
+        ..
+    } = &app.ui_state.modal
+    else {
+        panic!("expected clone destination prompt")
+    };
+    assert_eq!(
+        source,
+        &CloneSource::Gitlab {
+            full_name: "group/subgroup/project".into(),
+            hostname: Some("gitlab.example.com".into()),
+        }
+    );
 }
 
 #[tokio::test]
@@ -8449,7 +8616,7 @@ async fn a_refused_url_is_reported_and_leaves_the_picker_open() {
             matches!(
                 app.ui_state.modal,
                 Modal::QuickSwitch {
-                    mode: PaletteMode::GithubRepoPicker,
+                    mode: PaletteMode::RepositoryPicker,
                     ..
                 }
             ),
@@ -8799,7 +8966,7 @@ fn the_help_modal_documents_the_clone_picker() {
         .join("\n");
     // Listed as a (palette-only) bindable action…
     assert!(
-        text.contains("Clone a GitHub repository"),
+        text.contains("Clone a hosted repository"),
         "help must list the command: {text}"
     );
     // …and the picker's own keys, which are not bindable actions.

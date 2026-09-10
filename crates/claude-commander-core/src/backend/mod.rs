@@ -55,6 +55,7 @@ use crate::api::{
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
+use claude_commander_protocol::hosting::RepositoryListing;
 
 pub use error::{BResult, BackendError};
 pub use local::LocalBackend;
@@ -253,6 +254,7 @@ pub fn empty_snapshot() -> WorkspaceSnapshot {
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
+            code_host: Default::default(),
             tmux_ok: false,
             // The client's own version. The version-mismatch warning
             // (`server_version_mismatch`) depends on this: seeding the
@@ -695,10 +697,16 @@ pub trait CommanderBackend: Send + Sync {
     // A clone runs where the *sessions* run (a project registered on the server
     // host has to be checked out on the server host), so the local backend clones
     // locally and a remote backend asks its server to clone — same feature, and
-    // nothing for a frontend to gate on. `list_github_repos` can still *fail* as
+    // nothing for a frontend to gate on. `list_repositories` can still *fail* as
     // `Unavailable` when the host has no `gh`; that is a runtime state a picker
     // renders, not a static capability.
 
+    /// Repositories available from the provider selected on this backend's
+    /// host. The provider-bearing envelope keeps an empty result unambiguous.
+    async fn list_repositories(&self) -> BResult<RepositoryListing>;
+
+    /// Legacy GitHub-only listing retained for old clients and the compatibility
+    /// HTTP endpoint.
     /// Every GitHub repo the backend's host can clone, for the repo picker.
     /// Resolved by `gh` on that host, so its authenticated account decides the
     /// list — a remote backend shows the *server's* repos, not the operator's.
@@ -791,7 +799,8 @@ fn _assert_object_safe(b: Arc<dyn CommanderBackend>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claude_commander_protocol::github::{CloneSource, CloneStatus};
+    use claude_commander_protocol::github::CloneStatus;
+    use claude_commander_protocol::hosting::CloneSource;
 
     #[test]
     fn backend_id_local_is_zero() {
