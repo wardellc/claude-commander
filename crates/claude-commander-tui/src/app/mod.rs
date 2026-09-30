@@ -144,24 +144,26 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
 /// agent-states fetch falls back to empty. Returns `false` only when the event
 /// channel has closed, so a feed loop knows to stop.
 async fn fetch_and_send_backend_change(
+    sequence: Arc<std::sync::atomic::AtomicU64>,
     backend_id: usize,
     backend: Arc<dyn CommanderBackend>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
 ) -> bool {
-    let snapshot = match backend.snapshot().await {
+    let revision = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
+    let snapshot = match snapshot {
         Ok(s) => s,
         Err(e) => {
             debug!("Snapshot refresh for backend {backend_id} failed: {e}");
             return true;
         }
     };
-    let states = backend.agent_states(false).await.unwrap_or_else(|_| {
-        claude_commander_core::api::AgentStatesSnapshot {
-            states: Default::default(),
-            commander_running: false,
-        }
+    let states = states.unwrap_or_else(|_| claude_commander_core::api::AgentStatesSnapshot {
+        states: Default::default(),
+        commander_running: false,
     });
     tx.send(AppEvent::StateUpdate(StateUpdate::BackendChanged {
+        revision,
         backend_id,
         snapshot: Box::new(snapshot),
         states: Box::new(states),
@@ -1673,6 +1675,12 @@ pub struct AppUiState {
     /// When the last background preview/shell capture was spawned (None = not
     /// in flight). Guards `spawn_preview_update` against double-spawns.
     pub preview_update_spawned_at: Option<Instant>,
+    pub preview_task: Option<tokio::task::JoinHandle<()>>,
+    pub last_preview_refresh: Instant,
+    pub last_ui_maintenance: Instant,
+    pub last_animation: Instant,
+    pub pending_selection: Option<SessionRef>,
+    pub pending_project: Option<(BackendId, ProjectId)>,
     /// Right-pane rect from the last render frame, for wheel hit-testing.
     /// `None` in board view (no right pane) and before the first frame.
     pub right_pane_rect: Option<Rect>,
@@ -1871,6 +1879,12 @@ impl Default for AppUiState {
             info_state: PreviewState::anchored_top(),
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             preview_update_spawned_at: None,
+            preview_task: None,
+            last_preview_refresh: Instant::now(),
+            last_ui_maintenance: Instant::now(),
+            last_animation: Instant::now(),
+            pending_selection: None,
+            pending_project: None,
             right_pane_rect: None,
             last_pane_view: None,
             status_message: None, // (message, expiry)
@@ -2501,8 +2515,7 @@ impl App {
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
         let backend = self.backend_arc(id);
-        let snapshot = backend.snapshot().await;
-        let states = backend.agent_states(false).await;
+        let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
                 handle.view.snapshot = snapshot;
@@ -2833,12 +2846,19 @@ impl App {
 
         {
             let backend_id = handle.id.0;
+            let sequence = handle.refresh_sequence.clone();
             let backend = handle.backend.clone();
             let mut feed = backend.change_feed();
             let tx = self.event_loop.sender();
             tasks.push(tokio::spawn(async move {
                 while feed.changed().await {
-                    if !fetch_and_send_backend_change(backend_id, backend.clone(), tx.clone()).await
+                    if !fetch_and_send_backend_change(
+                        sequence.clone(),
+                        backend_id,
+                        backend.clone(),
+                        tx.clone(),
+                    )
+                    .await
                     {
                         break;
                     }
@@ -2858,7 +2878,14 @@ impl App {
     pub(super) fn spawn_backend_view_refresh(&self, id: BackendId) {
         let backend = self.backend_arc(id);
         let tx = self.event_loop.sender();
-        tokio::spawn(fetch_and_send_backend_change(id.0, backend, tx));
+        if let Some(handle) = self.backends.iter().find(|h| h.id == id) {
+            tokio::spawn(fetch_and_send_backend_change(
+                handle.refresh_sequence.clone(),
+                id.0,
+                backend,
+                tx,
+            ));
+        }
     }
 
     /// Run the application

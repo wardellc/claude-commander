@@ -27,6 +27,7 @@ export interface TerminalHooks {
    * with): take the user to the connect screen, unless it has been replaced.
    */
   onAuthRejected(token: string | null): void;
+  onRecoveryChanged?(): void;
 }
 
 let auth: Auth;
@@ -226,6 +227,7 @@ export function attach(id: string): void {
 export function detach(): void {
   closeSocket();
   halt = null;
+  hooks.onRecoveryChanged?.();
 }
 
 /** How the current attach stands (for a re-click on the selected session). */
@@ -279,6 +281,7 @@ export function reattach(): void {
 function startAttach(id: string, user = true): void {
   lifecycle = new AttachLifecycle();
   halt = null;
+  hooks.onRecoveryChanged?.();
   if (user) {
     recovery = new GoneRecovery();
     clearStickyConn();
@@ -370,6 +373,7 @@ function openSocket(id: string): void {
         // saying so in the header until the user attaches again.
         halt = "gone";
         recovery.onGone();
+        hooks.onRecoveryChanged?.();
         stickConn("error", next.message);
         break;
     }
