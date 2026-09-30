@@ -148,13 +148,15 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn state_watch_covers_new_comment_dirs_and_atomic_replacements() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut events = FileEvents::state(dir.path()).unwrap();
         for relative in [
             "state.json",
             "comments/session.json",
             "reviewed/session.json",
         ] {
+            // Each rename can emit several notifications. A fresh watcher
+            // ensures this assertion observes this file's replacement.
+            let dir = tempfile::TempDir::new().unwrap();
+            let mut events = FileEvents::state(dir.path()).unwrap();
             let target = dir.path().join(relative);
             let temporary = target.with_extension("tmp");
             std::fs::write(&temporary, "updated").unwrap();
@@ -165,6 +167,9 @@ mod tests {
                     .unwrap()
             );
         }
+        // No earlier rename notifications can masquerade as a worktree event.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut events = FileEvents::state(dir.path()).unwrap();
         let worktree = dir.path().join("worktrees/session");
         std::fs::create_dir_all(&worktree).unwrap();
         std::fs::write(worktree.join("source.rs"), "unrelated").unwrap();
