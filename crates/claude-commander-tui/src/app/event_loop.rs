@@ -34,6 +34,7 @@ impl App {
             terminal
                 .draw(|f| self.render(f))
                 .map_err(|e| TuiError::RenderError(e.to_string()))?;
+            self.event_loop.first_board_frame();
 
             // Wait for at least one event
             let Some(event) = self.event_loop.next().await else {
@@ -44,11 +45,14 @@ impl App {
             // This ensures rapid keypresses are handled immediately
             // without waiting for the next render cycle.
             let mut needs_tick = false;
+            let mut drained_events = 1;
             needs_tick |= self.process_event(event).await;
 
             while let Some(event) = self.event_loop.try_next() {
+                drained_events += 1;
                 needs_tick |= self.process_event(event).await;
             }
+            self.event_loop.report_resume_drain(drained_events);
 
             // Periodic background work (only on Tick). The PR-status,
             // project-pull, agent-state, and state-sync loops now run inside the
@@ -98,6 +102,7 @@ impl App {
             }
             AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
             AppEvent::Tick => {
+                self.event_loop.record_processed_tick();
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
                 if self.ui_state.tick_count.is_multiple_of(3) {
                     self.ui_state.throbber_state.calc_next();

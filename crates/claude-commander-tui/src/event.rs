@@ -695,6 +695,11 @@ pub struct EventLoop {
     input_generation: Arc<AtomicU64>,
     /// Current tick rate
     tick_rate: Option<Duration>,
+    queued_ticks: Arc<AtomicU64>,
+    processed_ticks: u64,
+    board_resume_at: Option<Instant>,
+    board_resume_ticks: (u64, u64),
+    resume_drain_at: Option<Instant>,
 }
 
 impl EventLoop {
@@ -706,6 +711,11 @@ impl EventLoop {
             rx,
             input_generation: Arc::new(AtomicU64::new(0)),
             tick_rate: None,
+            queued_ticks: Arc::new(AtomicU64::new(0)),
+            processed_ticks: 0,
+            board_resume_at: None,
+            board_resume_ticks: (0, 0),
+            resume_drain_at: None,
         }
     }
 
@@ -725,6 +735,7 @@ impl EventLoop {
 
         // Render tick task
         let tx = self.tx.clone();
+        let queued_ticks = self.queued_ticks.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tick_rate);
 
@@ -733,6 +744,7 @@ impl EventLoop {
                 if tx.send(AppEvent::Tick).await.is_err() {
                     break;
                 }
+                queued_ticks.fetch_add(1, Ordering::Relaxed);
             }
         });
     }
@@ -802,14 +814,54 @@ impl EventLoop {
         debug!("Input reader stop signaled");
     }
 
+    pub fn tick_counts(&self) -> (u64, u64) {
+        (
+            self.queued_ticks.load(Ordering::Relaxed),
+            self.processed_ticks,
+        )
+    }
+
+    pub fn record_processed_tick(&mut self) {
+        self.processed_ticks += 1;
+    }
+
+    pub fn mark_board_resume(&mut self) {
+        self.board_resume_at = Some(Instant::now());
+        self.resume_drain_at = self.board_resume_at;
+        self.board_resume_ticks = self.tick_counts();
+    }
+
+    pub fn report_resume_drain(&mut self, events: u64) {
+        if let Some(started) = self.resume_drain_at.take() {
+            let (queued, processed) = self.tick_counts();
+            tracing::info!(target: "attach_timing", stage = "first_board_event_drain", elapsed_ms = started.elapsed().as_millis(), events, queued_since_restart = queued.saturating_sub(self.board_resume_ticks.0), processed_since_restart = processed.saturating_sub(self.board_resume_ticks.1), "first board event batch drained");
+        }
+    }
+
+    pub fn first_board_frame(&mut self) {
+        if let Some(started) = self.board_resume_at.take() {
+            let (queued, processed) = self.tick_counts();
+            tracing::info!(target: "attach_timing", stage = "first_board_frame", elapsed_ms = started.elapsed().as_millis(), queued_since_restart = queued.saturating_sub(self.board_resume_ticks.0), processed_since_restart = processed.saturating_sub(self.board_resume_ticks.1), "board frame drawn");
+        }
+    }
+
     /// Restart the input reader after returning from tmux attach
-    pub fn restart_input(&mut self) {
+    pub fn restart_input(&mut self) -> (u64, u64) {
         // Drain any stale events from the channel
-        while self.rx.try_recv().is_ok() {}
+        let mut drained_ticks = 0;
+        let mut drained_other = 0;
+        while let Ok(event) = self.rx.try_recv() {
+            if matches!(event, AppEvent::Tick) {
+                drained_ticks += 1;
+            } else {
+                drained_other += 1;
+            }
+        }
 
         // Start a fresh input reader (generation was already incremented by stop_input)
         self.start_input_reader();
         debug!("Input reader restarted");
+        (drained_ticks, drained_other)
     }
 
     /// Receive the next event

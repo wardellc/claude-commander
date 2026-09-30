@@ -5,7 +5,9 @@
 
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -351,6 +353,8 @@ pub struct AttachConfig {
     /// `None` (local attach) forwards Ctrl+V so the co-located agent reads the
     /// clipboard directly, exactly as before.
     pub image_paste: Option<Arc<dyn ImagePasteSink>>,
+    /// Monotonic start of an instrumented TUI attach request.
+    pub request_started: Option<Instant>,
 }
 
 /// Async PTY attachment by tmux session name — the CLI/local entry point.
@@ -386,6 +390,7 @@ pub async fn attach_to_session(
         // The CLI/local attach runs the agent on this machine, so it reads the
         // local clipboard itself — no client-side capture.
         image_paste: None,
+        request_started: None,
     };
     run_attach(streams, cfg).await
 }
@@ -466,6 +471,7 @@ pub async fn attach_backend_session(
         switcher_enabled: false,
         session_name: None,
         image_paste,
+        request_started: None,
     };
 
     Ok(run_attach(streams, cfg).await?)
@@ -527,6 +533,7 @@ pub struct AttachSession {
     shutdown_rx: mpsc::Receiver<AttachResult>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     local_client_tty: Option<String>,
+    ctrl_q_at: Arc<OnceLock<Instant>>,
 }
 
 impl AttachSession {
@@ -548,6 +555,7 @@ impl AttachSession {
         let current_session = Arc::new(Mutex::new(cfg.session_name.clone().unwrap_or_default()));
         let paused = Arc::new(AtomicBool::new(false));
         let resume = Arc::new(Notify::new());
+        let ctrl_q_at = Arc::new(OnceLock::new());
 
         info!("Starting async I/O pumps");
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<AttachResult>(1);
@@ -560,6 +568,8 @@ impl AttachSession {
             paused.clone(),
             resume.clone(),
             current_session.clone(),
+            ctrl_q_at.clone(),
+            cfg.request_started,
             tokio::io::stdin(),
             tokio::io::stdout(),
         );
@@ -574,6 +584,7 @@ impl AttachSession {
             shutdown_rx,
             tasks,
             local_client_tty,
+            ctrl_q_at,
         })
     }
 
@@ -626,13 +637,22 @@ impl AttachSession {
 
     /// End the attach: stop the pumps, leave raw mode, and detach the transport.
     pub async fn finish(mut self, result: AttachResult) -> AttachOutcome {
+        let finish_started = Instant::now();
+        let since_ctrl_q = || self.ctrl_q_at.get().map(|at| at.elapsed().as_millis());
         info!("Attach ending with result: {:?}", result);
         for task in self.tasks.drain(..) {
             task.abort();
+            let _ = task.await;
+        }
+        if self.cfg.request_started.is_some() {
+            info!(target: "attach_timing", stage = "output_pumps_stopped", elapsed_from_ctrl_q_ms = ?since_ctrl_q(), elapsed_from_finish_ms = finish_started.elapsed().as_millis(), "attach output pumps stopped");
         }
 
         info!("Disabling raw mode");
-        let _ = disable_raw_mode();
+        let raw_mode_result = disable_raw_mode();
+        if self.cfg.request_started.is_some() {
+            info!(target: "attach_timing", stage = "raw_mode_restore", elapsed_from_ctrl_q_ms = ?since_ctrl_q(), success = raw_mode_result.is_ok(), "raw mode restore attempted");
+        }
         let _ = std::io::stdout().flush();
 
         // Flush any leftover input at the kernel level before teardown.
@@ -643,6 +663,9 @@ impl AttachSession {
         // exited). Detaches the client; the tmux session + program keep running.
         info!("Detaching attach transport");
         self.terminator.detach().await;
+        if self.cfg.request_started.is_some() {
+            info!(target: "attach_timing", stage = "tmux_client_exited", elapsed_from_ctrl_q_ms = ?since_ctrl_q(), "attach transport detached");
+        }
 
         // Flush again after teardown to discard stale input.
         flush_stdin();
@@ -787,6 +810,8 @@ fn spawn_pumps<R, W>(
     paused: Arc<AtomicBool>,
     resume: Arc<Notify>,
     current_session: Arc<Mutex<String>>,
+    ctrl_q_at: Arc<OnceLock<Instant>>,
+    request_started: Option<Instant>,
     mut term_in: R,
     mut term_out: W,
 ) -> Vec<tokio::task::JoinHandle<()>>
@@ -809,6 +834,7 @@ where
     let stdout_paused = paused.clone();
     let stdout_task = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
+        let mut first_output = true;
 
         loop {
             match reader.read(&mut buf).await {
@@ -823,6 +849,12 @@ where
                 // client behind it.
                 Ok(_) if stdout_paused.load(Ordering::Acquire) => continue,
                 Ok(n) => {
+                    if first_output {
+                        first_output = false;
+                        if let Some(started) = request_started {
+                            info!(target: "attach_timing", stage = "tmux_client_ready", elapsed_from_request_ms = started.elapsed().as_millis(), "first tmux output received");
+                        }
+                    }
                     if term_out.write_all(&buf[..n]).await.is_err() {
                         break;
                     }
@@ -868,7 +900,12 @@ where
                     ) {
                         InputAction::Break(result) => {
                             match &result {
-                                AttachResult::Detached => debug!("Ctrl+Q detected, detaching"),
+                                AttachResult::Detached => {
+                                    let _ = ctrl_q_at.set(Instant::now());
+                                    if request_started.is_some() {
+                                        info!(target: "attach_timing", stage = "ctrl_q_received", "Ctrl+Q received by attach input pump");
+                                    }
+                                }
                                 AttachResult::SwitchToShell => {
                                     debug!("Ctrl+\\ detected, switching to shell")
                                 }
@@ -1023,6 +1060,7 @@ mod tests {
             switcher_enabled: true,
             session_name: Some("cc-test".to_string()),
             image_paste: None,
+            request_started: None,
         }
     }
 
@@ -1068,6 +1106,8 @@ mod tests {
             paused.clone(),
             resume.clone(),
             Arc::new(Mutex::new("cc-test".to_string())),
+            Arc::new(OnceLock::new()),
+            None,
             term_far,
             term_out_far,
         );

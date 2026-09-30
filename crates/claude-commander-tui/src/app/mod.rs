@@ -2851,6 +2851,10 @@ impl App {
             } else {
                 match self.ui_state.attach_request.take() {
                     Some(request) => {
+                        let attach_started = Instant::now();
+                        let (ticks_queued_before, ticks_processed_before) =
+                            self.event_loop.tick_counts();
+                        info!(target: "attach_timing", stage = "attach_request", queued_ticks = ticks_queued_before, processed_ticks = ticks_processed_before, "attach requested");
                         // Stop the input reader BEFORE attaching so it doesn't
                         // compete for stdin, then flush the key that triggered
                         // this attach.
@@ -2917,6 +2921,7 @@ impl App {
                                     break;
                                 }
                             };
+                            info!(target: "attach_timing", stage = "attach_connection_open", elapsed_from_request_ms = attach_started.elapsed().as_millis(), "attach connection opened");
                             let streams = conn.split();
 
                             // Only intercept Ctrl+Z / Alt-r / Alt-V for Claude
@@ -2969,6 +2974,7 @@ impl App {
                                 switcher_enabled: true,
                                 session_name: name.clone(),
                                 image_paste,
+                                request_started: Some(attach_started),
                             };
 
                             let outcome = match self.drive_attach(streams, cfg).await {
@@ -3107,7 +3113,11 @@ impl App {
                         // AgentStatesUpdated queued while attached).
                         claude_commander_core::tmux::flush_stdin();
                         info!("Returned from attach, restarting input reader");
-                        self.event_loop.restart_input();
+                        let (drained_ticks, drained_other) = self.event_loop.restart_input();
+                        let (ticks_queued_after, ticks_processed_after) =
+                            self.event_loop.tick_counts();
+                        info!(target: "attach_timing", stage = "input_reader_restarted", elapsed_from_request_ms = attach_started.elapsed().as_millis(), queued_during_attach = ticks_queued_after.saturating_sub(ticks_queued_before), processed_during_attach = ticks_processed_after.saturating_sub(ticks_processed_before), drained_ticks, drained_other, "input reader restarted");
+                        self.event_loop.mark_board_resume();
 
                         // Refresh agent state for just the sessions we viewed, via
                         // the *attached* session's backend, applying the fresh
@@ -3138,7 +3148,10 @@ impl App {
                             for id in &viewed_ids {
                                 let _ = backend.mark_read(*id).await;
                             }
-                            if let Ok(fresh) = backend.agent_states(true).await {
+                            let refresh_started = Instant::now();
+                            let fresh_result = backend.agent_states(true).await;
+                            info!(target: "attach_timing", stage = "post_attach_agent_refresh", elapsed_ms = refresh_started.elapsed().as_millis(), "post-attach agent-state refresh complete");
+                            if let Ok(fresh) = fresh_result {
                                 let refreshed: BTreeMap<SessionId, AgentState> = fresh
                                     .states
                                     .into_iter()

@@ -6,9 +6,10 @@
 //! result caching mechanics and dispatches to the right harness.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::TmuxExecutor;
 use crate::agent::AgentKind;
@@ -20,6 +21,7 @@ pub struct AgentStateDetector {
     executor: TmuxExecutor,
     cache: HashMap<String, (AgentState, Instant)>,
     cache_ttl: Duration,
+    query_count: AtomicU64,
 }
 
 impl AgentStateDetector {
@@ -29,6 +31,7 @@ impl AgentStateDetector {
             executor,
             cache: HashMap::new(),
             cache_ttl,
+            query_count: AtomicU64::new(0),
         }
     }
 
@@ -99,6 +102,7 @@ impl AgentStateDetector {
 
     /// Get the tmux pane title.
     async fn get_pane_title(&self, tmux_session_name: &str) -> Result<String> {
+        self.query_count.fetch_add(1, Ordering::Relaxed);
         self.executor
             .execute(&[
                 "display-message",
@@ -112,6 +116,7 @@ impl AgentStateDetector {
 
     /// Capture visible pane content (no scrollback, no ANSI escapes).
     async fn capture_visible_pane(&self, tmux_session_name: &str) -> Result<String> {
+        self.query_count.fetch_add(1, Ordering::Relaxed);
         self.executor
             .execute(&["capture-pane", "-t", tmux_session_name, "-p"])
             .await
@@ -125,6 +130,8 @@ impl AgentStateDetector {
         &mut self,
         sessions: &[(SessionId, String, String)],
     ) -> BTreeMap<SessionId, AgentState> {
+        let started = Instant::now();
+        let queries_before = self.query_count.load(Ordering::Relaxed);
         let mut results = BTreeMap::new();
 
         for (session_id, tmux_name, program) in sessions {
@@ -134,6 +141,14 @@ impl AgentStateDetector {
             results.insert(*session_id, state);
         }
 
+        info!(
+            target: "attach_timing",
+            stage = "agent_state_sweep",
+            elapsed_ms = started.elapsed().as_millis(),
+            sessions = sessions.len(),
+            tmux_queries = self.query_count.load(Ordering::Relaxed) - queries_before,
+            "agent-state sweep complete"
+        );
         results
     }
 }
