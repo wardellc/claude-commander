@@ -12250,3 +12250,249 @@ async fn a_removed_backends_create_completion_is_ignored() {
     assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "current modal"));
     assert!(app.ui_state.pending_selection.is_none());
 }
+
+#[tokio::test]
+async fn attach_return_renders_before_slow_fresh_agent_detection() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let viewed = HashSet::from([name]);
+    let gate = remote_mock(&app, BackendId(1)).block_fresh_agent_states();
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states
+        .insert(sid, AgentState::Working);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([(sid, AgentState::Idle)]),
+            commander_running: false,
+        },
+    );
+    let started = Instant::now();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        app.refresh_after_attach(BackendId(1), &viewed),
+    )
+    .await
+    .expect("attach return must allow a board frame while fresh detection is blocked");
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let first_frame = started.elapsed();
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Working)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .read_marked_sessions()
+            .contains(&sid)
+    );
+
+    // Model the reference's ~706 ms scan, without running tmux or reading stdin.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    gate.notify_one();
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    let fresh_completed = started.elapsed();
+    app.process_event(event).await;
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states.get(&sid),
+        Some(&AgentState::Idle)
+    );
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .agent_states_calls()
+            .contains(&true)
+    );
+    println!("attach return: first frame={first_frame:?}, fresh completion={fresh_completed:?}");
+}
+
+#[tokio::test]
+async fn attach_refresh_marks_switcher_visits_and_preserves_other_backends() {
+    let (mut snapshot, first, _) = snapshot_with_one_session();
+    let mut second = snapshot.sessions[0].clone();
+    second.session_id = SessionId::new();
+    second.tmux_session_name = "cc-second".into();
+    let second_id = second.session_id;
+    snapshot.sessions.push(second);
+    let mut untouched = snapshot.sessions[0].clone();
+    untouched.session_id = SessionId::new();
+    untouched.tmux_session_name = "cc-unviewed".into();
+    let untouched_id = untouched.session_id;
+    snapshot.sessions.push(untouched);
+    let first_name = snapshot.sessions[0].tmux_session_name.clone();
+    let (other_snapshot, other_sid, _) = snapshot_with_one_session();
+    let mut app =
+        build_app_with_mock_remotes(vec![("buildbox", snapshot), ("other", other_snapshot)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_backend_view(BackendId(2)).await;
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = BTreeMap::from([
+        (first, AgentState::Working),
+        (second_id, AgentState::Working),
+        (untouched_id, AgentState::Working),
+    ]);
+    app.backend_mut_for_test(BackendId(2))
+        .view
+        .agent_states
+        .states = BTreeMap::from([(other_sid, AgentState::Working)]);
+    app.ui_state
+        .agent_states
+        .insert(other_sid, AgentState::Idle);
+    remote_mock(&app, BackendId(1)).set_agent_states(
+        claude_commander_core::api::AgentStatesSnapshot {
+            states: BTreeMap::from([
+                (first, AgentState::Idle),
+                (second_id, AgentState::Idle),
+                (untouched_id, AgentState::Idle),
+            ]),
+            commander_running: false,
+        },
+    );
+    app.refresh_after_attach(
+        BackendId(1),
+        &HashSet::from([first_name, "cc-second-sh".into(), "commander".into()]),
+    )
+    .await;
+    let event = tokio::time::timeout(Duration::from_secs(1), app.event_loop.next())
+        .await
+        .unwrap()
+        .unwrap();
+    app.process_event(event).await;
+    let marked = remote_mock(&app, BackendId(1)).read_marked_sessions();
+    assert_eq!(marked.len(), 2);
+    assert!(marked.contains(&first) && marked.contains(&second_id));
+    assert!(
+        remote_mock(&app, BackendId(2))
+            .read_marked_sessions()
+            .is_empty()
+    );
+    assert_eq!(
+        app.view_for(BackendId(1)).agent_states.states,
+        BTreeMap::from([
+            (first, AgentState::Idle),
+            (second_id, AgentState::Idle),
+            (untouched_id, AgentState::Working),
+        ])
+    );
+    assert_eq!(
+        app.view_for(BackendId(2))
+            .agent_states
+            .states
+            .get(&other_sid),
+        Some(&AgentState::Working)
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&other_sid),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_local_merge_and_stale_events() {
+    let mut app = make_test_app();
+    let (mut snapshot, viewed, _) = snapshot_with_one_session();
+    snapshot.sessions[0].unread = true;
+    app.backend_mut_for_test(LOCAL_BACKEND_ID).view.snapshot = snapshot.clone();
+    let unviewed = SessionId::new();
+    let old = BTreeMap::from([
+        (viewed, AgentState::Working),
+        (unviewed, AgentState::Working),
+    ]);
+    app.ui_state.agent_states = old.clone();
+    app.backend_mut_for_test(LOCAL_BACKEND_ID)
+        .view
+        .agent_states
+        .states = old;
+    app.process_event(AppEvent::StateUpdate(
+        StateUpdate::ViewedAgentStatesUpdated {
+            backend_id: LOCAL_BACKEND_ID.0,
+            revision: 2,
+            states: BTreeMap::from([(viewed, AgentState::Idle)]),
+        },
+    ))
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states,
+        app.view_for(LOCAL_BACKEND_ID).agent_states.states
+    );
+    assert_eq!(
+        app.ui_state.agent_states.get(&unviewed),
+        Some(&AgentState::Working)
+    );
+    // The mark-read snapshot request started before the fresh read finished.
+    // Its workspace fields are still valid, even though its agent states are old.
+    snapshot.sessions[0].unread = false;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        snapshot: Box::new(snapshot),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(!app.view_for(LOCAL_BACKEND_ID).snapshot.sessions[0].unread);
+    assert_eq!(app.backend(LOCAL_BACKEND_ID).unwrap().view_revision, 1);
+    assert_eq!(
+        app.backend(LOCAL_BACKEND_ID).unwrap().agent_states_revision,
+        2
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: LOCAL_BACKEND_ID.0,
+        revision: 1,
+        states: BTreeMap::from([(viewed, AgentState::Working)]),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+    app.handle_state_update(StateUpdate::ViewedAgentStatesUpdated {
+        backend_id: 999,
+        revision: 3,
+        states: BTreeMap::new(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.agent_states.get(&viewed),
+        Some(&AgentState::Idle)
+    );
+}
+
+#[tokio::test]
+async fn attach_refresh_failure_and_no_viewed_sessions_preserve_cache() {
+    let (mut app, sid) = app_with_remote_session().await;
+    let name = app.view_for(BackendId(1)).snapshot.sessions[0]
+        .tmux_session_name
+        .clone();
+    let states = BTreeMap::from([(sid, AgentState::Working)]);
+    app.backend_mut_for_test(BackendId(1))
+        .view
+        .agent_states
+        .states = states.clone();
+    let calls = remote_mock(&app, BackendId(1)).agent_states_calls().len();
+    app.refresh_after_attach(BackendId(1), &HashSet::from(["commander".into()]))
+        .await;
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).agent_states_calls().len(),
+        calls
+    );
+    remote_mock(&app, BackendId(1)).set_failing(true);
+    app.refresh_after_attach(BackendId(1), &HashSet::from([name]))
+        .await;
+    // Await the owned refresh task instead of sleeping to guess completion.
+    app.backend_mut_for_test(BackendId(1))
+        .feed_tasks
+        .pop()
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(app.view_for(BackendId(1)).agent_states.states, states);
+    assert!(app.event_loop.try_next().is_none());
+}

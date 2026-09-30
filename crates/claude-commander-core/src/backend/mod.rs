@@ -331,6 +331,8 @@ pub struct BackendHandle {
     pub refresh_sequence: Arc<std::sync::atomic::AtomicU64>,
     /// Latest refresh folded into the cached view.
     pub view_revision: u64,
+    /// Latest agent-state refresh; state-only reads must not discard snapshots.
+    pub agent_states_revision: u64,
     pub id: BackendId,
     pub backend: Arc<dyn CommanderBackend>,
     pub view: BackendView,
@@ -348,6 +350,7 @@ impl BackendHandle {
             view: BackendView::connecting(),
             refresh_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             view_revision: 0,
+            agent_states_revision: 0,
             feed_tasks: Vec::new(),
         }
     }

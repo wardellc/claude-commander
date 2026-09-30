@@ -157,6 +157,12 @@ pub enum StateUpdate {
         snapshot: Box<claude_commander_core::api::Snapshot>,
         states: Box<claude_commander_core::api::AgentStatesSnapshot>,
     },
+    /// Fresh detection after detach, limited to sessions actually viewed.
+    ViewedAgentStatesUpdated {
+        backend_id: usize,
+        revision: u64,
+        states: std::collections::BTreeMap<SessionId, claude_commander_core::session::AgentState>,
+    },
     /// A backend's connection health changed (a remote server's poller moved
     /// between Connecting/Connected/Degraded). Folded into that backend's
     /// [`BackendView::connection`](claude_commander_core::backend::BackendView) so its server
