@@ -19,6 +19,24 @@ impl App {
                 }
                 self.spawn_backend_view_refresh(BackendId(backend_id));
             }
+            StateUpdate::ViewedAgentStatesUpdated {
+                backend_id,
+                revision,
+                states,
+            } => {
+                let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) else {
+                    return;
+                };
+                if revision < handle.agent_states_revision {
+                    return;
+                }
+                handle.agent_states_revision = revision;
+                apply_viewed_session_refresh(&mut handle.view.agent_states.states, states.clone());
+                if handle.id == LOCAL_BACKEND_ID {
+                    apply_viewed_session_refresh(&mut self.ui_state.agent_states, states);
+                }
+                self.refresh_list_items().await;
+            }
             StateUpdate::BackendChanged {
                 revision,
                 backend_id,
@@ -32,6 +50,10 @@ impl App {
                     return;
                 }
                 handle.view_revision = revision;
+                let states_are_current = revision >= handle.agent_states_revision;
+                if states_are_current {
+                    handle.agent_states_revision = revision;
+                }
                 let states = *states;
                 let is_local = backend_id == claude_commander_core::backend::LOCAL_BACKEND_ID.0;
                 // Diff the OLD agent states (before we overwrite them) against
@@ -44,7 +66,9 @@ impl App {
                 // own per-backend `view.agent_states` captured here before the
                 // fold below overwrites them. Either way `spawn_review_refresh`
                 // routes to the session's owning backend.
-                let review_refresh = if is_local {
+                let review_refresh = if !states_are_current {
+                    None
+                } else if is_local {
                     self.review_refresh_on_transition(&self.ui_state.agent_states, &states.states)
                 } else {
                     self.backends
@@ -56,7 +80,9 @@ impl App {
 
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
                     handle.view.snapshot = *snapshot;
-                    handle.view.agent_states = states.clone();
+                    if states_are_current {
+                        handle.view.agent_states = states.clone();
+                    }
                     // The local backend's connection derives from the snapshot's
                     // tmux health; a remote backend's is owned by its
                     // connection-watch task, so a fold must not touch it.
@@ -71,7 +97,7 @@ impl App {
                 // commander chip, and the project-pull badges (folded out of the
                 // snapshot the poll loops maintain). Single-backend this phase;
                 // Phase E merges every backend's states into one tree.
-                if is_local {
+                if is_local && states_are_current {
                     self.ui_state.agent_states = states.states;
                     self.ui_state.commander_running = states.commander_running;
                 }

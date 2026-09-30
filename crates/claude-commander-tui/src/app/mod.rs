@@ -2888,6 +2888,70 @@ impl App {
         }
     }
 
+    /// Refresh the sessions actually viewed during an attach, including switcher visits.
+    pub(super) async fn refresh_after_attach(
+        &mut self,
+        attached_backend: BackendId,
+        viewed: &HashSet<String>,
+    ) {
+        let viewed_ids: HashSet<SessionId> = self
+            .view_for(attached_backend)
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|s| {
+                viewed
+                    .iter()
+                    .any(|n| s.tmux_session_name == n.strip_suffix("-sh").unwrap_or(n))
+            })
+            .map(|s| s.session_id)
+            .collect();
+        if !viewed_ids.is_empty() {
+            // The service loop runs during the attach and may have
+            // flagged a watched session unread when it went idle.
+            // Clear unread for everything we actually saw — the
+            // operator watched those turns finish.
+            let backend = self.backend_arc(attached_backend);
+            for id in &viewed_ids {
+                let _ = backend.mark_read(*id).await;
+            }
+            if let Some(handle) = self.backends.iter_mut().find(|h| h.id == attached_backend) {
+                let sequence = handle.refresh_sequence.clone();
+                let tx = self.event_loop.sender();
+                // Keep the fresh service read: it advances the shared unread
+                // baseline too. Only its wait moves off the first-frame path.
+                let task = tokio::spawn(async move {
+                    match backend.agent_states(true).await {
+                        Ok(fresh) => {
+                            let states = fresh
+                                .states
+                                .into_iter()
+                                .filter(|(id, _)| viewed_ids.contains(id))
+                                .collect();
+                            // The fresh read has updated the service cache. Older
+                            // cache reads still in flight must not overwrite it.
+                            let revision =
+                                sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(
+                                    StateUpdate::ViewedAgentStatesUpdated {
+                                        backend_id: attached_backend.0,
+                                        revision,
+                                        states,
+                                    },
+                                ))
+                                .await;
+                        }
+                        Err(e) => debug!("Post-attach agent-state refresh failed: {e}"),
+                    }
+                });
+                handle.feed_tasks.retain(|task| !task.is_finished());
+                handle.feed_tasks.push(task);
+            }
+            self.refresh_list_items().await;
+        }
+    }
+
     /// Run the application
     pub async fn run(&mut self) -> Result<()> {
         // tmux drives every *local* session, but a remote-only operator can work
@@ -3362,68 +3426,13 @@ impl App {
 
                         // Flush stdin again after detach to discard stale input,
                         // then restart the input reader (also draining any
-                        // AgentStatesUpdated queued while attached).
+                        // backend updates queued while attached).
                         claude_commander_core::tmux::flush_stdin();
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
 
-                        // Refresh agent state for just the sessions we viewed, via
-                        // the *attached* session's backend, applying the fresh
-                        // states directly. We do NOT clear the whole map: that
-                        // would blank every spinner until the next poll.
-                        // `agent_states(true)` also advances the service loop's
-                        // shared baseline to these observed states, so the loop
-                        // won't re-flag a just-finished session on its next tick.
                         let attached_backend = self.attach_target_backend(&current);
-                        let viewed_ids: HashSet<SessionId> = self
-                            .view_for(attached_backend)
-                            .snapshot
-                            .sessions
-                            .iter()
-                            .filter(|s| {
-                                viewed.iter().any(|n| {
-                                    s.tmux_session_name == n.strip_suffix("-sh").unwrap_or(n)
-                                })
-                            })
-                            .map(|s| s.session_id)
-                            .collect();
-                        if !viewed_ids.is_empty() {
-                            // The service loop runs during the attach and may have
-                            // flagged a watched session unread when it went idle.
-                            // Clear unread for everything we actually saw — the
-                            // operator watched those turns finish.
-                            let backend = self.backend_arc(attached_backend);
-                            for id in &viewed_ids {
-                                let _ = backend.mark_read(*id).await;
-                            }
-                            if let Ok(fresh) = backend.agent_states(true).await {
-                                let refreshed: BTreeMap<SessionId, AgentState> = fresh
-                                    .states
-                                    .into_iter()
-                                    .filter(|(id, _)| viewed_ids.contains(id))
-                                    .collect();
-                                // Fold into the attached backend's cached view —
-                                // the tree reads agent state per-backend from there.
-                                if let Some(handle) =
-                                    self.backends.iter_mut().find(|h| h.id == attached_backend)
-                                {
-                                    state::apply_viewed_session_refresh(
-                                        &mut handle.view.agent_states.states,
-                                        refreshed.clone(),
-                                    );
-                                }
-                                // The local rendered map also feeds local-only
-                                // consumers (commander chip, review-transition
-                                // detection), so keep it in sync for a local attach.
-                                if attached_backend == LOCAL_BACKEND_ID {
-                                    state::apply_viewed_session_refresh(
-                                        &mut self.ui_state.agent_states,
-                                        refreshed,
-                                    );
-                                }
-                            }
-                            self.refresh_list_items().await;
-                        }
+                        self.refresh_after_attach(attached_backend, &viewed).await;
 
                         // Focus the session the user just left so the tree lands
                         // on it (important after the in-session switcher).

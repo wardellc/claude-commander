@@ -5957,6 +5957,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_states_fresh_advances_shared_unread_baseline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            commander_enabled: false,
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let sid = SessionId::new();
+        svc.agent_states_cache
+            .write()
+            .await
+            .states
+            .insert(sid, AgentState::Working);
+        let idle = BTreeMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle),
+            vec![sid]
+        );
+        // There are no active sessions; the fresh scan clears the old baseline
+        // without any tmux queries. This is also the cache read by the poll loop.
+        let fresh = svc.agent_states(true).await;
+        assert_eq!(svc.agent_states_cache.read().await.states, fresh.states);
+        assert!(
+            detect_unread_transitions(&svc.agent_states_cache.read().await.states, &idle)
+                .is_empty()
+        );
+        assert_eq!(svc.agent_states(false).await.states, fresh.states);
+    }
+
+    #[tokio::test]
     async fn agent_states_unprimed_reports_commander_running_honestly() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
