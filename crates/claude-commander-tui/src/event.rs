@@ -106,6 +106,10 @@ pub enum StateUpdate {
     /// left to name — and the handler answers with a toast rather than a modal,
     /// because a missed dictation is not a failure the user has to dismiss.
     DictationUndeliverable,
+    ActionFinished {
+        backend_id: usize,
+        message: Result<String, String>,
+    },
     /// Session creation completed successfully
     SessionCreated {
         session_id: SessionId,
@@ -148,6 +152,7 @@ pub enum StateUpdate {
     /// [`BackendView`](claude_commander_core::backend::BackendView). `backend_id` indexes the
     /// TUI's `Vec<BackendHandle>`.
     BackendChanged {
+        revision: u64,
         backend_id: usize,
         snapshot: Box<claude_commander_core::api::Snapshot>,
         states: Box<claude_commander_core::api::AgentStatesSnapshot>,

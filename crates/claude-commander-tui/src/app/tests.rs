@@ -3884,6 +3884,7 @@ async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
 
     // Land the older snapshot (first real snapshot arrives via BackendChanged).
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -3908,6 +3909,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
 
     // First fold of the older snapshot: the one-time toast fires.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -3925,6 +3927,7 @@ async fn stale_server_toast_fires_once_and_never_for_local() {
     // A second fold must NOT re-fire the toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -3955,6 +3958,7 @@ async fn version_toast_does_not_clobber_a_live_status_message() {
         std::time::Instant::now() + std::time::Duration::from_secs(30),
     ));
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -3998,6 +4002,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
 
     // Fold buildbox (id 1): its toast fires; ci is still on its placeholder.
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(old_snap.clone()),
         states: agent_states_box(),
@@ -4017,6 +4022,7 @@ async fn two_stale_servers_each_get_their_own_toast() {
     // Free the slot, then fold ci (id 2): it gets its own toast.
     app.ui_state.status_message = None;
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(2).0,
         snapshot: Box::new(old_snap),
         states: agent_states_box(),
@@ -4145,6 +4151,7 @@ async fn pull_blocked_badges_union_remote_backend_snapshot() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -4181,6 +4188,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     };
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(degraded_snap),
         states: states(),
@@ -4196,6 +4204,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(0).0,
         snapshot: Box::new(empty_snapshot()),
         states: states(),
@@ -4234,6 +4243,7 @@ async fn remote_connection_stays_watch_owned_across_snapshot_fold() {
     .await;
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6002,6 +6012,7 @@ async fn fold_backend_states(
     app.backend_mut_for_test(id).view.agent_states.states = old_states;
     let snapshot = app.view_for(id).snapshot.clone();
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: id.0,
         snapshot: Box::new(snapshot),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -6495,6 +6506,14 @@ async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("creation refresh should complete");
     assert_eq!(
         remote_mock(&app, BackendId(1)).reconciled_sessions(),
         vec![new_id],
@@ -6638,6 +6657,7 @@ async fn pending_comment_markers_union_every_backend_view() {
     );
 
     app.handle_state_update(StateUpdate::BackendChanged {
+        revision: 0,
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
@@ -7606,6 +7626,14 @@ async fn apply_section_move_keeps_moved_session_selected() {
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while app.ui_state.pending_selection.is_some() {
+            let event = app.event_loop.next().await.unwrap();
+            app.process_event(event).await;
+        }
+    })
+    .await
+    .expect("section move refresh should finish");
     let pos = app
         .ui_state
         .board_state
@@ -8293,8 +8321,10 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
         selected,
     ));
 
+    let token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(token);
     app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: Instant::now(),
+        spawned_at: token,
         session_id: Some(selected),
         project_id: None,
         preview_content: "live output".to_string(),
@@ -11051,6 +11081,20 @@ mod workspaces {
             None,
         )
         .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !app
+                .local_view()
+                .snapshot
+                .projects
+                .iter()
+                .any(|p| p.name == "scanned")
+            {
+                let event = app.event_loop.next().await.unwrap();
+                app.process_event(event).await;
+            }
+        })
+        .await
+        .expect("scan completion should refresh the project list");
         let scanned = app
             .local_view()
             .snapshot
@@ -12159,4 +12203,50 @@ mod workspaces {
             "help must say workspaces have themes and where to edit them: {text}"
         );
     }
+}
+
+#[tokio::test]
+async fn an_idle_tick_does_not_invalidate_the_frame() {
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::Board;
+    assert!(!app.process_event(AppEvent::Tick).await);
+}
+
+#[tokio::test]
+async fn superseded_preview_for_the_same_selection_cannot_overwrite_a_newer_resource() {
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.right_pane_view = RightPaneView::Shell;
+    app.ui_state.preview_content = "current pane".into();
+    app.ui_state.shell_content = "current shell".into();
+    let new_token = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(new_token);
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: new_token - Duration::from_millis(1),
+        session_id: Some(sid),
+        project_id: None,
+        preview_content: "obsolete pane".into(),
+        shell_content: "obsolete shell".into(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_content, "current pane");
+    assert_eq!(app.ui_state.shell_content, "current shell");
+    assert_eq!(app.ui_state.preview_update_spawned_at, Some(new_token));
+}
+
+#[tokio::test]
+async fn a_removed_backends_create_completion_is_ignored() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Error {
+        message: "current modal".into(),
+    };
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: SessionId::new(),
+        backend_id: 999,
+    })
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Error { message } if message == "current modal"));
+    assert!(app.ui_state.pending_selection.is_none());
 }
