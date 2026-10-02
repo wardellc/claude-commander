@@ -66,7 +66,7 @@ impl App {
         Ok(())
     }
 
-    /// Process a single event, returns true if it was a Tick
+    /// Process a single event, returning whether the frame needs a redraw.
     pub(super) async fn process_event(&mut self, event: AppEvent) -> bool {
         match event {
             AppEvent::Input(input) => {
@@ -118,7 +118,7 @@ impl App {
             }
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
-                let mut dirty = false;
+                let mut dirty = self.drain_dictations();
                 if self.ui_state.last_animation.elapsed() >= Duration::from_millis(100) {
                     self.ui_state.last_animation = Instant::now();
                     self.ui_state.throbber_state.calc_next();

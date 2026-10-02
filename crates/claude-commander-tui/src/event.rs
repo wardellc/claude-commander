@@ -97,15 +97,6 @@ pub enum StateUpdate {
     SessionRemoved { session_id: SessionId },
     /// Error occurred
     Error { message: String },
-    /// A dictated transcript arrived with no attached pane to type it into.
-    ///
-    /// Raised off the UI loop, by the transcript consumer task: it holds the
-    /// [`PaneInjector`](claude_commander_core::tmux::PaneInjector) but no `&mut
-    /// App`, and a failed injection is the only way it can learn the attach is
-    /// over. Carries nothing — the pane it wanted is gone, so there is nothing
-    /// left to name — and the handler answers with a toast rather than a modal,
-    /// because a missed dictation is not a failure the user has to dismiss.
-    DictationUndeliverable,
     ActionFinished {
         backend_id: usize,
         message: Result<String, String>,
@@ -464,7 +455,7 @@ pub enum UserCommand {
     /// Toggle voice input: start/stop recording the mic for transcription (STT)
     ToggleVoiceInput,
     /// Toggle dictation: record the mic and type the transcript into the
-    /// attached session pane (STT)
+    /// attached session pane, or the open dialog's text field (STT)
     ToggleDictation,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
@@ -1897,7 +1888,11 @@ mod input_reader_tests {
         );
 
         gate.open();
-        // A second stop now observes the exit and forgets the reader.
+        // A second stop now observes the exit and forgets the reader. It is
+        // expected to complete, so give it the real grace: the shortened one
+        // exists to time out the wedged stop, and a loaded runner can take
+        // longer than 50ms to schedule the reader's exit.
+        ev.stop_grace = INPUT_STOP_GRACE;
         ev.stop_input().await;
         assert_eq!(overlap.live.load(Ordering::Acquire), 0);
         assert!(ev.input_reader.is_none());
@@ -1934,6 +1929,8 @@ mod input_reader_tests {
         assert_eq!(overlap.live.load(Ordering::Acquire), 0, "wedged one gone");
         assert_eq!(idle.live.load(Ordering::Acquire), 1);
 
+        // A normal stop, so the real grace (see the test above).
+        ev.stop_grace = INPUT_STOP_GRACE;
         ev.stop_input().await;
         assert_eq!(idle.live.load(Ordering::Acquire), 0);
     }
