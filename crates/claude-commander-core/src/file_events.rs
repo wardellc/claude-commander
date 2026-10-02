@@ -52,39 +52,11 @@ impl FileEvents {
         recursive: bool,
         accept: impl Fn(&Path) -> bool + Send + 'static,
     ) -> notify::Result<Self> {
-        let roots = paths.to_vec();
         let (tx, rx) = watch::channel(0_u64);
         let failed = Arc::new(AtomicBool::new(false));
-        let callback_failed = failed.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let relevant = match event {
-                    Ok(event) => {
-                        // A directory watch may no longer cover its replacement.
-                        // Wake the consumer and restore reconciliation on that path.
-                        let replaced_root =
-                            matches!(
-                                event.kind,
-                                notify::EventKind::Remove(_)
-                                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-                            ) && event.paths.iter().any(|path| roots.contains(path));
-                        if replaced_root {
-                            callback_failed.store(true, Ordering::Relaxed);
-                        }
-                        replaced_root
-                            || !matches!(event.kind, notify::EventKind::Access(_))
-                                && event.paths.iter().any(|path| accept(path))
-                    }
-                    Err(_) => {
-                        callback_failed.store(true, Ordering::Relaxed);
-                        true
-                    }
-                };
-                if relevant {
-                    tx.send_modify(|g| *g = g.wrapping_add(1));
-                }
-            })?;
-        for path in paths {
+        let (paths, handler) = invalidation_handler(paths, accept, tx, failed.clone())?;
+        let mut watcher = notify::recommended_watcher(handler)?;
+        for path in &paths {
             watcher.watch(
                 path,
                 if recursive {
@@ -143,6 +115,53 @@ impl FileEvents {
     }
 }
 
+/// Build the callback and return the paths to register with the watcher.
+fn invalidation_handler(
+    paths: &[PathBuf],
+    accept: impl Fn(&Path) -> bool + Send + 'static,
+    tx: watch::Sender<u64>,
+    failed: Arc<AtomicBool>,
+) -> notify::Result<(
+    Vec<PathBuf>,
+    impl FnMut(notify::Result<notify::Event>) + Send + 'static,
+)> {
+    // notify's FSEvents backend canonicalises registrations (notify 8.2.0,
+    // src/fsevent.rs:392). Cache the same identities before a root disappears,
+    // and register them on every backend so callback paths and roots agree.
+    let paths = paths
+        .iter()
+        .map(std::fs::canonicalize)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let roots = paths.clone();
+    let handler = move |event: notify::Result<notify::Event>| {
+        let relevant = match event {
+            Ok(event) => {
+                // A directory watch may no longer cover its replacement.
+                // Wake the consumer and restore reconciliation on that path.
+                let replaced_root = matches!(
+                    event.kind,
+                    notify::EventKind::Remove(_)
+                        | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                ) && event.paths.iter().any(|path| roots.contains(path));
+                if replaced_root {
+                    failed.store(true, Ordering::Relaxed);
+                }
+                replaced_root
+                    || !matches!(event.kind, notify::EventKind::Access(_))
+                        && event.paths.iter().any(|path| accept(path))
+            }
+            Err(_) => {
+                failed.store(true, Ordering::Relaxed);
+                true
+            }
+        };
+        if relevant {
+            tx.send_modify(|g| *g = g.wrapping_add(1));
+        }
+    };
+    Ok((paths, handler))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +197,40 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_canonical_root_rename_invalidates_a_watch_created_through_a_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir_all(real.join("comments")).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let canonical_root = std::fs::canonicalize(real.join("comments")).unwrap();
+        let (tx, mut rx) = watch::channel(0_u64);
+        let failed = Arc::new(AtomicBool::new(false));
+        let (registered, mut handler) =
+            invalidation_handler(&[alias.join("comments")], |_| false, tx, failed.clone()).unwrap();
+
+        // The old path is gone when the callback arrives. Normalise watch roots
+        // at registration, rather than trying to resolve a deleted event path.
+        std::fs::rename(real.join("comments"), real.join("old-comments")).unwrap();
+        handler(Ok(notify::Event::new(notify::EventKind::Modify(
+            notify::event::ModifyKind::Name(notify::event::RenameMode::From),
+        ))
+        .add_path(canonical_root.clone())));
+
+        assert!(
+            rx.has_changed().unwrap(),
+            "root replacement must wake reconciliation"
+        );
+        assert!(
+            failed.load(Ordering::Relaxed),
+            "the old watch is no longer healthy"
+        );
+        rx.borrow_and_update();
+        assert_eq!(registered, vec![canonical_root]);
     }
 
     #[tokio::test]
