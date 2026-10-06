@@ -2591,17 +2591,54 @@ impl CommanderService {
     /// Reload the state file on a fixed cadence, waking the change-feed when
     /// another instance mutated it. No-op loop when `interval_ms` is 0.
     fn spawn_state_sync_loop(&self, interval_ms: u64) -> tokio::task::JoinHandle<()> {
-        let store = self.store.clone();
+        let service = self.clone();
         tokio::spawn(async move {
             if interval_ms == 0 {
                 return;
             }
-            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            let data_dir = service.store.data_dir();
+            let mut watcher = tokio::task::spawn_blocking(move || {
+                crate::file_events::FileEvents::state(&data_dir)
+            })
+            .await
+            .ok()
+            .and_then(|result| result.ok());
+            // Watcher-backed installations need only occasional reconciliation;
+            // unsupported filesystems retain the operator's polling cadence.
+            let cadence = if watcher.is_some() {
+                interval_ms.max(30_000)
+            } else {
+                interval_ms
+            };
+            let mut interval = tokio::time::interval(Duration::from_millis(cadence));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                match store.reload_if_changed().await {
-                    Ok(_) => {}
-                    Err(e) => debug!("State sync check failed: {e}"),
+                let event = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = async {
+                        match &mut watcher {
+                            Some(watcher) => { watcher.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => true,
+                };
+                if event {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if event {
+                    service.comments.invalidate_pending().await;
+                }
+                if let Err(e) = service.store.reload_if_changed().await {
+                    debug!("State sync check failed: {e}");
+                }
+                if watcher.as_ref().is_some_and(|w| !w.healthy()) {
+                    watcher = None;
+                    interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    interval.tick().await;
+                }
+                if event {
+                    service.store.notify_change();
                 }
             }
         })
