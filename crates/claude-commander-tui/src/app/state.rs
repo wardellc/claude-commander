@@ -37,6 +37,11 @@ impl App {
                 }
                 self.refresh_list_items().await;
             }
+            StateUpdate::ConfigReloaded { result } => {
+                if self.apply_config_reload(result) {
+                    self.refresh_list_items().await;
+                }
+            }
             StateUpdate::BackendChanged {
                 revision,
                 backend_id,
@@ -49,6 +54,10 @@ impl App {
                 if revision < handle.view_revision {
                     return;
                 }
+                let old_host = handle.view.snapshot.server.effective_code_host();
+                let host = snapshot.server.effective_code_host();
+                let host_changed =
+                    old_host.provider != host.provider || old_host.hostname != host.hostname;
                 handle.view_revision = revision;
                 let states_are_current = revision >= handle.agent_states_revision;
                 if states_are_current {
@@ -100,6 +109,19 @@ impl App {
                 if is_local && states_are_current {
                     self.ui_state.agent_states = states.states;
                     self.ui_state.commander_running = states.commander_running;
+                }
+                if host_changed {
+                    self.invalidate_code_host_caches(BackendId(backend_id), host);
+                    let handle = self
+                        .backends
+                        .iter_mut()
+                        .find(|h| h.id.0 == backend_id)
+                        .unwrap();
+                    let backend = handle.backend.clone();
+                    handle.feed_tasks.retain(|task| !task.is_finished());
+                    handle.feed_tasks.push(tokio::spawn(async move {
+                        let _ = backend.request_pr_refresh().await;
+                    }));
                 }
                 // Pull badges union every backend's snapshot (project ids are
                 // globally unique), so a remote's blocked pull must be re-folded
@@ -191,10 +213,16 @@ impl App {
                 session_id,
                 info,
             } => {
-                // Same generation-token rule as `PreviewReady` above.
-                if self.ui_state.enriched_pr_fetch_spawned_at == Some(spawned_at) {
-                    self.ui_state.enriched_pr_fetch_spawned_at = None;
+                // Unlike pane previews, enriched review data is provider-bound.
+                // A provider switch clears this token, so rejecting a result
+                // that no longer owns it prevents an in-flight GitHub response
+                // from repopulating caches after switching to GitLab (and vice
+                // versa).
+                if self.ui_state.enriched_pr_fetch_spawned_at != Some(spawned_at) {
+                    debug!("Discarding superseded EnrichedPrReady for {session_id}");
+                    return;
                 }
+                self.ui_state.enriched_pr_fetch_spawned_at = None;
                 // Only apply if the session is still selected
                 if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
                     // An empty result caches nothing, so record the attempt
@@ -351,7 +379,7 @@ impl App {
                 self.ui_state.pending_project = Some((BackendId(backend_id), project_id));
                 self.spawn_backend_view_refresh(BackendId(backend_id));
             }
-            StateUpdate::GithubReposLoaded {
+            StateUpdate::RepositoriesLoaded {
                 backend_id,
                 generation,
                 result,
@@ -363,12 +391,13 @@ impl App {
                 if generation != self.ui_state.repo_picker.generation
                     || self.ui_state.repo_picker.backend.0 != backend_id
                 {
-                    debug!("Discarding stale GitHub repo listing (gen {generation})");
+                    debug!("Discarding stale repository listing (gen {generation})");
                     return;
                 }
                 match result {
-                    Ok(repos) => {
-                        self.ui_state.repo_picker.repos = repos;
+                    Ok(listing) => {
+                        self.ui_state.repo_picker.host = listing.host;
+                        self.ui_state.repo_picker.repos = listing.repositories;
                         self.ui_state.repo_picker.fetch = super::RepoFetch::Ready;
                     }
                     Err(message) => {
@@ -377,7 +406,7 @@ impl App {
                         // the picker's title reflects the state.
                         self.ui_state.repo_picker.repos.clear();
                         self.ui_state.status_message = Some((
-                            format!("Could not list GitHub repos: {message}"),
+                            format!("Could not list repositories: {message}"),
                             Instant::now() + Duration::from_secs(8),
                         ));
                         self.ui_state.repo_picker.fetch = super::RepoFetch::Failed(message);
