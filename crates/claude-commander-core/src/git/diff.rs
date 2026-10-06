@@ -703,9 +703,24 @@ mod tests {
         let cache = DiffCache::<u64>::new();
         let initial = cache.get_diff(&1, dir.path()).await.unwrap();
         assert!(!initial.has_changes());
+        let watcher_is_healthy = || {
+            cache
+                .watchers
+                .lock()
+                .unwrap()
+                .get(&1)
+                .and_then(|watch| watch.watcher.as_ref())
+                .is_some_and(|watcher| watcher.healthy())
+        };
+        assert!(
+            watcher_is_healthy(),
+            "this regression requires a live watcher"
+        );
         let clone = cache.clone();
         std::fs::write(dir.path().join("Cargo.lock"), "updated\n").unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
+        // Allow event delivery and Git work under parallel CI load, while
+        // staying below the healthy watch's 30-second reconciliation interval.
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if clone
                     .get_diff(&1, dir.path())
@@ -719,8 +734,17 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
-        .await
-        .expect("filesystem edits should invalidate the shared cache");
+        .await;
+        assert!(
+            result.is_ok(),
+            "filesystem edits should invalidate the shared cache; watcher healthy: {}, cache age: {:?}",
+            watcher_is_healthy(),
+            initial.computed_at.elapsed(),
+        );
+        assert!(
+            watcher_is_healthy(),
+            "reconciliation must not satisfy this regression"
+        );
     }
 
     #[tokio::test]
