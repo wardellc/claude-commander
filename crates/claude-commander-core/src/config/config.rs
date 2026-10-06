@@ -19,6 +19,16 @@ use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
 
+/// The `[workspace_themes]` key that holds the built-in Main workspace's theme.
+///
+/// Main has no name (it is the untagged workspace, and its display label is
+/// renameable), so its theme needs a fixed key that no user workspace can
+/// take. `"main"` is one of the protocol's
+/// [`RESERVED_WORKSPACE_NAMES`](claude_commander_protocol::workspace::RESERVED_WORKSPACE_NAMES),
+/// which `validate_workspace_name` refuses case-insensitively, and it is the
+/// spelling `startup_workspace = "main"` already uses for Main.
+pub const MAIN_WORKSPACE_THEME_KEY: &str = "main";
+
 /// A selectable agent harness in the new-session program picker: a display
 /// `label` paired with the `command` to launch (program plus any flags).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,6 +351,35 @@ pub struct Config {
     #[serde(default)]
     pub sections: Vec<crate::session::SectionConfig>,
 
+    /// User-defined workspaces (`[[workspaces]]`: `name`), in display order. A workspace is a label on a project; the
+    /// built-in Main workspace (untagged projects) is never listed here. Edited
+    /// through `CommanderService::set_workspace_defs` / `rename_workspace` /
+    /// `delete_workspace` — the latter two also rewrite project tags, which a
+    /// plain config write cannot.
+    #[serde(default)]
+    pub workspaces: Vec<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Display label for the built-in Main workspace (`[main_workspace]`).
+    /// Unset shows "Main".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_workspace: Option<claude_commander_protocol::workspace::WorkspaceDef>,
+
+    /// Which workspace a frontend opens on: `"last"` (default — whichever that
+    /// client last had active), `"main"`, or a workspace name. A pinned name
+    /// that no longer exists falls back to Main.
+    #[serde(default)]
+    pub startup_workspace: claude_commander_protocol::workspace::StartupWorkspace,
+
+    /// Per-workspace TUI themes (`[workspace_themes."<name>"]`), keyed by
+    /// workspace name, with Main under [`MAIN_WORKSPACE_THEME_KEY`]. Each entry
+    /// is a `ThemeOverrides` read against `[theme]`: an entry without `preset`
+    /// layers its overrides over the usual theme; one with `preset` starts from
+    /// that preset. Local only: not on the wire and not in the server's config
+    /// patch. `CommanderService::rename_workspace` / `delete_workspace` move or
+    /// drop the entry.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub workspace_themes: std::collections::BTreeMap<String, ThemeOverrides>,
+
     /// Advisory WIP limit for the implicit "In Progress" catch-all section.
     /// When set, the section header shows `count/n`, rendering in the warning
     /// colour when `count == n` and the error colour when `count > n`. Purely
@@ -392,6 +431,16 @@ pub struct Config {
     /// default. Validated on load (see [`Config::validate_remote_servers`]).
     #[serde(default)]
     pub remote_servers: Vec<RemoteServerConfig>,
+
+    /// How *this* machine exposes its own sessions over HTTP: the `[server]`
+    /// table read by the standalone `claude-commander-server` binary and by the
+    /// TUI's embedded server. See [`ServerConfig`].
+    ///
+    /// It lives on core's `Config` (rather than in the server crate) because
+    /// `ConfigStore` persists by re-serialising this struct, so a table core did
+    /// not model was deleted by the next settings edit.
+    #[serde(default)]
+    pub server: super::ServerConfig,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -496,17 +545,28 @@ pub struct SttConfig {
     /// Microphone to capture from, as cpal's stable device id (the PipeWire
     /// `node.name`, e.g. `alsa_input.pci-0000_c1_00.6.analog-stereo`). `None`
     /// uses the system default input device. Set it via the picker in
-    /// Settings ▸ Conversation rather than by hand. Ids — not friendly names —
+    /// Settings ▸ Voice rather than by hand. Ids — not friendly names —
     /// are stored because a mic and its speaker's loopback share a name; if the
     /// device is absent at record time, capture falls back to the default (with
     /// a warning) rather than failing.
     pub input_device: Option<String>,
+
+    /// Whether dictation (Alt-T) presses Enter after typing a transcript into
+    /// the attached pane. `"never"` types the text and stops, `"agent"` also
+    /// submits on an agent pane but leaves a shell pane alone, `"always"`
+    /// submits on any pane.
+    ///
+    /// Insert-only is the default because transcription mishears, and the pane
+    /// is a terminal: the user reads what was typed and presses Enter
+    /// themselves, which costs one keystroke and cannot run a command nobody
+    /// said. See [`DictationSubmit`](crate::conversation::DictationSubmit).
+    pub dictation_submit: crate::conversation::DictationSubmit,
 }
 
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
-            // Off by default — enable it in Settings ▸ Conversation.
+            // Off by default — enable it in Settings ▸ Voice.
             enabled: false,
             // Localhost placeholder, like the TTS default; override in config to
             // point at your transcription server.
@@ -517,6 +577,8 @@ impl Default for SttConfig {
             api_key: None,
             pause_media: true,
             input_device: None,
+            // Insert-only: the user reviews the transcript and presses Enter.
+            dictation_submit: crate::conversation::DictationSubmit::Never,
         }
     }
 }
@@ -604,6 +666,10 @@ impl Default for Config {
             rounded_borders: false,
             precompute_review_caches: true,
             sections: Vec::new(),
+            workspaces: Vec::new(),
+            main_workspace: None,
+            workspace_themes: std::collections::BTreeMap::new(),
+            startup_workspace: Default::default(),
             in_progress_limit: None,
             recent_sessions_limit: default_recent_sessions_limit(),
             commander_enabled: false,
@@ -613,6 +679,7 @@ impl Default for Config {
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
             remote_servers: Vec::new(),
+            server: super::ServerConfig::default(),
         }
     }
 }
@@ -669,6 +736,11 @@ impl Config {
         }
         self.stt.api_key = None;
         self.telemetry.token = None;
+        // This server's OWN bearer token. `GET /config` is authenticated with
+        // that very token, but the response also reaches clients that merely
+        // hold it for one server and must not learn the others' — and it is
+        // written to logs and support dumps by the same call sites.
+        self.server.token = None;
         self
     }
 
@@ -1094,6 +1166,7 @@ fn parse_key_code(s: &str) -> KeyCode {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ServerConfig;
     #[test]
     fn with_secrets_redacted_clears_every_credential_field() {
         let c = Config {
@@ -1110,6 +1183,11 @@ mod tests {
                 token: Some("telemetry-secret".into()),
                 ..Default::default()
             },
+            server: ServerConfig {
+                port: 9999,
+                token: Some("own-secret".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1117,15 +1195,72 @@ mod tests {
         assert!(redacted.remote_servers[0].token.is_none());
         assert!(redacted.stt.api_key.is_none());
         assert!(redacted.telemetry.token.is_none());
+        assert!(redacted.server.token.is_none());
         // Non-secret fields survive.
         assert_eq!(redacted.remote_servers[0].url, "http://b:7878");
+        assert_eq!(redacted.server.port, 9999);
         let json = serde_json::to_string(&redacted).unwrap();
-        for secret in ["server-secret", "stt-secret", "telemetry-secret"] {
+        for secret in [
+            "server-secret",
+            "stt-secret",
+            "telemetry-secret",
+            "own-secret",
+        ] {
             assert!(!json.contains(secret), "{secret} survived redaction");
         }
     }
 
     use super::*;
+
+    /// The `[server]` table round-trips through core's loader with the key
+    /// names the server crate has always used, so an existing `config.toml`
+    /// keeps working unchanged. Replaces the server crate's
+    /// `server_table_overrides_defaults`, which owned this contract while
+    /// `ServerConfig` lived there.
+    #[test]
+    fn server_table_round_trips_with_its_original_key_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[programs]]
+label = "Claude"
+command = "claude"
+
+[server]
+auto_start = true
+bind = "0.0.0.0"
+port = 9999
+token = "sekret"
+cors_allowed_origins = ["http://localhost:3000"]
+"#,
+        )
+        .unwrap();
+
+        let c = Config::load_from_path(&path).unwrap();
+        assert!(c.server.auto_start);
+        assert_eq!(c.server.bind.to_string(), "0.0.0.0");
+        assert_eq!(c.server.port, 9999);
+        assert_eq!(c.server.token.as_deref(), Some("sekret"));
+        assert_eq!(c.server.cors_allowed_origins, ["http://localhost:3000"]);
+        // Core's own keys still parse from the same file.
+        assert_eq!(c.default_session_program(), "claude");
+    }
+
+    /// A `config.toml` with no `[server]` table loads with the table's defaults,
+    /// which must leave the server switched off.
+    #[test]
+    fn missing_server_table_defaults_to_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "branch_prefix = \"wt/\"\n").unwrap();
+
+        let c = Config::load_from_path(&path).unwrap();
+        assert!(!c.server.auto_start);
+        assert_eq!(c.server.port, 7878);
+        assert!(c.server.token.is_none());
+    }
 
     #[test]
     fn test_max_sessions_and_in_progress_limit_round_trip() {
@@ -1214,6 +1349,11 @@ has_label = ["blocked", "waiting-on-author"]
         assert_eq!(c.prompt, None);
         assert_eq!(c.api_key, None);
         assert_eq!(c.input_device, None);
+        // Insert-only: a dictated transcript waits for the user's own Enter.
+        assert_eq!(
+            c.dictation_submit,
+            crate::conversation::DictationSubmit::Never
+        );
     }
 
     #[test]
@@ -1221,6 +1361,25 @@ has_label = ["blocked", "waiting-on-author"]
         let config: Config = toml::from_str("").expect("empty toml");
         assert!(!config.stt.enabled);
         assert_eq!(config.stt.base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(
+            config.stt.dictation_submit,
+            crate::conversation::DictationSubmit::Never
+        );
+    }
+
+    #[test]
+    fn test_stt_dictation_submit_toml_roundtrip() {
+        let toml_src = r#"
+[stt]
+dictation_submit = "agent"
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(
+            config.stt.dictation_submit,
+            crate::conversation::DictationSubmit::Agent
+        );
+        // Unspecified fields keep their defaults.
+        assert!(!config.stt.enabled);
     }
 
     #[test]

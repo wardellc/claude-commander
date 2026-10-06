@@ -119,6 +119,7 @@ const _: () = assert!(
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct GithubRepo {
     /// `owner/name`, the form `gh repo clone` takes as an argument.
     pub full_name: String,
@@ -145,6 +146,7 @@ pub struct GithubRepo {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneRequest {
     pub source: CloneSource,
     /// Override for the destination directory name. `None` means "use the name
@@ -153,6 +155,11 @@ pub struct CloneRequest {
     /// same safety rules as a derived one.
     #[serde(default)]
     pub dest_name: Option<String>,
+    /// Workspace to tag the cloned project with once it is registered (`None`
+    /// = Main). Additive: an older client omits it, and it is skipped on the
+    /// way out when absent so an older server sees exactly the old body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Identifier for an in-flight clone.
@@ -165,6 +172,7 @@ pub struct CloneRequest {
 /// The inner `Uuid` is `pub` so flutter_rust_bridge can mirror the newtype;
 /// prefer the `from_uuid`/`as_uuid` accessors in Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneJobId(pub Uuid);
 
 impl CloneJobId {
@@ -206,6 +214,7 @@ impl fmt::Display for CloneJobId {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CloneStatus {
     /// Clone in progress.
@@ -222,6 +231,7 @@ pub enum CloneStatus {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneJob {
     pub id: CloneJobId,
     /// What to show the user as the source — the `owner/name` slug or the URL.
@@ -242,6 +252,7 @@ pub struct CloneJob {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CloneTarget {
     pub source: String,
     pub default_dir_name: String,
@@ -1352,12 +1363,17 @@ mod tests {
         let minimal: CloneRequest =
             serde_json::from_str(r#"{"source":{"kind":"github","full_name":"o/r"}}"#).unwrap();
         assert!(minimal.dest_name.is_none());
+        assert!(
+            minimal.workspace.is_none(),
+            "an older client's clone lands in Main"
+        );
 
         let req = CloneRequest {
             source: CloneSource::Url {
                 url: "https://example.com/o/r.git".to_string(),
             },
             dest_name: Some("mine".to_string()),
+            workspace: Some("Work".to_string()),
         };
         let back: CloneRequest =
             serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();

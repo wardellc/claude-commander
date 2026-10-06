@@ -33,7 +33,6 @@
 use crossterm::event::KeyEventKind;
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
 use std::io::{Stdout, Write};
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use super::*;
@@ -113,6 +112,13 @@ impl App {
                     match (switched, in_place) {
                         (true, Some((_, name))) => {
                             session.set_current_session(name).await;
+                            // An in-place switch keeps the same attach — and so
+                            // the same injection channel — but changes what is
+                            // on screen. Without this the dictation policy would
+                            // keep planning against the pane the user left.
+                            self.conversation
+                                .injector
+                                .set_pane(self.pane_info_for(&target));
                             session.resume().await;
                         }
                         // Either the pick can't be reached in place, or the
@@ -165,14 +171,12 @@ impl App {
         self.event_loop.restart_input();
         let exit = self.switcher_event_loop(&mut terminal).await;
 
-        // `stop_input` only signals; the reader can still poll for one more
-        // ~50ms tick and *discards* whatever it reads once the generation has
-        // changed (`tui/event.rs`). Handing the terminal back inside that window
-        // means the dying reader and the resumed stdin pump both read it, and
-        // the first keystroke after Esc vanishes. The pre-attach path settles for
+        // Wait for the reader thread to exit before the stdin pump resumes:
+        // handing the terminal back while both read it means the first
+        // keystroke after Esc goes to whichever wins, and a split escape
+        // sequence reaches the pane as junk. The pre-attach path awaits this for
         // the same reason (`app/mod.rs`, before `flush_stdin`).
-        self.event_loop.stop_input();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.event_loop.stop_input().await;
 
         match exit {
             OverlayExit::Cancelled { .. } => OverlayExit::Cancelled {
@@ -534,6 +538,8 @@ mod tests {
             agent_state: None,
             unread: false,
             last_attached_at: None,
+            workspace: None,
+            other_workspace: None,
         })
     }
 

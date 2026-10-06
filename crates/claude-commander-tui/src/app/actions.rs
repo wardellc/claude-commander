@@ -102,6 +102,78 @@ pub(super) fn sort_palette_matches(scored: &mut [(i64, QuickSwitchMatch)], query
     } else {
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
     }
+    // The active workspace's sessions first, keeping the order above within
+    // each half (the sort is stable). Rows only differ here once a second
+    // workspace exists, since `other_workspace` is `None` until then.
+    scored.sort_by_key(|(_, m)| m.other_workspace.is_some());
+}
+
+/// What the copy-token command should report back to the operator.
+pub(super) enum CopyTokenReport {
+    /// Transient status-bar message.
+    Toast(String),
+    /// A modal, for something the operator has to act on.
+    Modal(String),
+}
+
+/// The URL and token needed to pair a client, or the message explaining why
+/// there are none.
+///
+/// Pure, so the "never render the token" invariant can be tested without a
+/// clipboard.
+pub(super) fn pairing_details(
+    status: Option<&crate::EmbeddedServerStatus>,
+) -> std::result::Result<(String, String), String> {
+    let Some(status) = status else {
+        return Err("No server is running in this session".to_string());
+    };
+    match (status.url(), status.token()) {
+        (Some(url), Some(token)) => Ok((url.to_string(), token.to_string())),
+        // Serving, but with authentication disabled — only reachable by passing
+        // `--allow-no-auth` to the standalone binary, so not a state `--serve`
+        // can produce. There is no token to hand out.
+        (Some(url), None) => Err(format!(
+            "Server at {url} needs no token (authentication disabled)"
+        )),
+        // The bind failed; the chip already says so.
+        (None, _) => Err("No server is running in this session".to_string()),
+    }
+}
+
+/// Decide what to show after attempting the copy.
+///
+/// The token is deliberately absent from both arms: the status bar and any modal
+/// are in the scrollback and in every screenshot, and this UI does not render
+/// credentials (the settings row shows only `(set)`; the STT API key isn't in
+/// the settings modal at all). The URL is not a secret and is shown, so the
+/// operator can confirm *what* was copied.
+pub(super) fn copy_token_report(
+    url: &str,
+    clipboard: std::result::Result<(), String>,
+    token_location: &str,
+) -> CopyTokenReport {
+    match clipboard {
+        Ok(()) => CopyTokenReport::Toast(format!("Server token copied \u{00b7} {url}")),
+        // Ordinary rather than exceptional: no display over plain SSH, no
+        // compositor, or the `clipboard` feature compiled out. Point at the
+        // value instead of printing it.
+        Err(e) => CopyTokenReport::Modal(format!(
+            "Could not reach the clipboard ({e}).\n\n\
+             The server is at {url}.\n\n\
+             Its token is normally the `token` key under [server] in:\n\n  \
+             {token_location}\n\n\
+             (If it came from CC_SERVER_TOKEN, or could not be saved, the log says so.)"
+        )),
+    }
+}
+
+/// Where the operator can expect to find the server token on disk. Best-effort:
+/// the path is only the *usual* home for it, which is why `copy_token_report`
+/// hedges rather than asserting.
+pub(super) fn token_location_hint() -> String {
+    claude_commander_core::Config::config_file_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "your config.toml".to_string())
 }
 
 /// Confirmation prompt for deleting a session. Names the session by its
@@ -672,16 +744,20 @@ impl App {
 
     /// Build the project picker for a new-session dialog: every project sorted
     /// by name, with `default` pre-selected.
-    async fn new_project_picker(
+    pub(super) async fn new_project_picker(
         &self,
         backend: BackendId,
         default: ProjectId,
     ) -> super::ProjectPicker {
+        // Scoped to the active workspace like the lists; the default (the
+        // selected row's project) is always offered.
+        let filter = self.workspace_filter();
         let mut choices: Vec<super::ProjectChoice> = self
             .view_for(backend)
             .snapshot
             .projects
             .iter()
+            .filter(|p| p.id == default || filter.admits(p.workspace.as_deref()))
             .map(|p| super::ProjectChoice {
                 id: p.id,
                 name: p.name.clone(),
@@ -725,6 +801,23 @@ impl App {
                     },
                 ))
                 .await;
+        });
+    }
+
+    fn spawn_add_local_project(&self, path: PathBuf, workspace: Option<String>) {
+        let backend = self.local_arc();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let update = match backend.add_project(path, workspace).await {
+                Ok(project_id) => StateUpdate::ProjectAdded {
+                    backend_id: LOCAL_BACKEND_ID.0,
+                    project_id,
+                },
+                Err(error) => StateUpdate::Error {
+                    message: format!("Failed to add project: {error}"),
+                },
+            };
+            let _ = tx.send(AppEvent::StateUpdate(update)).await;
         });
     }
 
@@ -1289,6 +1382,14 @@ impl App {
     /// so an active project filter never narrows the palette.
     fn scored_palette_sessions(&self, query: &str) -> Vec<(i64, QuickSwitchMatch)> {
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
+        // The palette spans every workspace; rows outside the active one carry
+        // its label as a tag (and rank after the active workspace's rows).
+        let merged = self.merged_workspaces();
+        let tagging = claude_commander_viewmodel::workspace::workspaces_visible(&merged);
+        let active = claude_commander_viewmodel::workspace::effective_workspace(
+            self.ui_state.active_workspace.as_deref(),
+            &merged,
+        );
         for handle in &self.backends {
             let agent_states = &handle.view.agent_states.states;
             for session in &handle.view.snapshot.sessions {
@@ -1306,6 +1407,18 @@ impl App {
                 ) else {
                     continue;
                 };
+                let workspace = claude_commander_viewmodel::workspace::session_workspace(
+                    &handle.view.snapshot,
+                    session,
+                );
+                let other_workspace = (tagging && workspace != active.as_deref())
+                    .then(|| {
+                        merged
+                            .iter()
+                            .find(|w| w.name.as_deref() == workspace)
+                            .map(|w| w.label.clone())
+                    })
+                    .flatten();
                 scored.push((
                     score,
                     QuickSwitchMatch {
@@ -1320,6 +1433,8 @@ impl App {
                         agent_state: agent_states.get(&session.session_id).copied(),
                         unread: session.unread,
                         last_attached_at: session.last_attached_at,
+                        workspace: workspace.map(str::to_string),
+                        other_workspace,
                     },
                 ));
             }
@@ -1385,6 +1500,12 @@ impl App {
         }
         if eff_mode == PaletteMode::RepositoryPicker {
             return self.gather_repository_picker_items(eff_query);
+        }
+        if eff_mode == PaletteMode::WorkspacePicker {
+            return self.gather_workspace_picker_items(eff_query);
+        }
+        if let PaletteMode::MoveProjectPicker { project_id } = eff_mode {
+            return self.gather_move_project_items(project_id, eff_query);
         }
         if matches!(eff_mode, PaletteMode::Unified | PaletteMode::SessionOnly) {
             for m in self.gather_quick_switch_matches(eff_query).await {
@@ -1468,6 +1589,10 @@ impl App {
                 Some(self.gather_remote_server_picker_items(eff_query))
             }
             PaletteMode::RepositoryPicker => Some(self.gather_repository_picker_items(eff_query)),
+            PaletteMode::WorkspacePicker => Some(self.gather_workspace_picker_items(eff_query)),
+            PaletteMode::MoveProjectPicker { project_id } => {
+                Some(self.gather_move_project_items(project_id, eff_query))
+            }
             PaletteMode::Unified | PaletteMode::CommandOnly | PaletteMode::SessionOnly => None,
         };
         if let Some(rows) = picker_rows {
@@ -1581,28 +1706,27 @@ impl App {
         let Some(session_id) = self.ui_state.selected_session_id else {
             return;
         };
-        match self
-            .backend_arc(session_id.backend)
-            .toggle_keep_alive(session_id.id)
-            .await
-        {
-            Ok(keep_alive) => {
-                let msg = if keep_alive {
-                    "Keep-alive on — session won't auto-hibernate"
-                } else {
-                    "Keep-alive off — idle session may auto-hibernate"
-                };
-                self.ui_state.status_message =
-                    Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
-                self.refresh_list_items().await;
-            }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Failed to toggle keep-alive: {e}"),
-                    Instant::now() + Duration::from_secs(3),
-                ));
-            }
-        }
+        let backend = self.backend_arc(session_id.backend);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let message = backend
+                .toggle_keep_alive(session_id.id)
+                .await
+                .map(|keep_alive| {
+                    if keep_alive {
+                        "Keep-alive on — session won't auto-hibernate".to_string()
+                    } else {
+                        "Keep-alive off — idle session will auto-hibernate".to_string()
+                    }
+                })
+                .map_err(|e| format!("Failed to toggle keep-alive: {e}"));
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+                    backend_id: session_id.backend.0,
+                    message,
+                }))
+                .await;
+        });
     }
 
     /// Handle delete session - show confirmation
@@ -1986,8 +2110,8 @@ impl App {
         session_id: SessionId,
         result: std::result::Result<claude_commander_core::api::SetSessionBaseOutcome, String>,
     ) {
-        self.refresh_backend_view(backend_id).await;
-        self.refresh_list_items().await;
+        self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+        self.spawn_backend_view_refresh(backend_id);
         if self.select_session_in_tree(session_id) {
             self.ui_state.preview_update_spawned_at = None;
             self.spawn_preview_update();
@@ -2308,6 +2432,9 @@ impl App {
         let req = CloneRequest {
             source: source.clone(),
             dest_name,
+            // The clone registers a new project: it lands in the workspace
+            // being looked at.
+            workspace: self.active_workspace(),
         };
         tokio::spawn(async move {
             // One task owns the whole job: accept it, then poll until it
@@ -2405,8 +2532,7 @@ impl App {
             }
             CloneStatus::Succeeded { .. } => {
                 self.ui_state.status_message = toast(format!("Cloned {}", job.source_label));
-                self.refresh_backend_view(backend_id).await;
-                self.refresh_list_items().await;
+                self.spawn_backend_view_refresh(backend_id);
             }
             CloneStatus::Failed { message } => {
                 self.ui_state.status_message = None;
@@ -2561,7 +2687,7 @@ impl App {
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = match factory(&server) {
-                Ok(backend) => match backend.workspace_snapshot().await {
+                Ok(backend) => match backend.snapshot().await {
                     Ok(snap) => Ok(snap.server.tmux_ok),
                     Err(e) => Err(e.to_string()),
                 },
@@ -2598,6 +2724,36 @@ impl App {
                 }))
                 .await;
         });
+    }
+
+    /// Put the embedded server's bearer token on the OS clipboard so a client
+    /// can be paired.
+    ///
+    /// Only the I/O lives here; what to *show* is decided by the pure
+    /// [`pairing_details`] and [`copy_token_report`] below, which is what the
+    /// tests exercise. Driving this method from a test would write to the
+    /// developer's own clipboard — `arboard` has no seam to fake — and pass
+    /// vacuously on a headless runner, which is the worst of both.
+    pub(super) async fn copy_server_token(&mut self) {
+        let (url, token) = match pairing_details(self.ui_state.embedded_server.as_ref()) {
+            Ok(details) => details,
+            Err(message) => {
+                self.ui_state.status_message =
+                    Some((message, Instant::now() + Duration::from_secs(4)));
+                return;
+            }
+        };
+
+        let outcome = claude_commander_core::clipboard::set_text(token).await;
+        match copy_token_report(&url, outcome, &token_location_hint()) {
+            CopyTokenReport::Toast(message) => {
+                self.ui_state.status_message =
+                    Some((message, Instant::now() + Duration::from_secs(6)));
+            }
+            CopyTokenReport::Modal(message) => {
+                self.ui_state.modal = Modal::Error { message };
+            }
+        }
     }
 
     /// Handle rename session - show input modal pre-filled with current title.
@@ -2766,23 +2922,8 @@ impl App {
                 // filesystem, so the path is only meaningful on the local
                 // backend. Remote add-project routing is deferred until there's
                 // a server-side path completer to pick a remote path with.
-                match self.local_arc().add_project(path).await {
-                    Ok(project_id) => {
-                        self.ui_state.status_message = Some((
-                            format!("Added project {}", project_id),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
-                        self.refresh_local_view().await;
-                        self.refresh_list_items().await;
-                        // Select the newly added project in the sidebar.
-                        self.select_project_in_sidebar(project_id);
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to add project: {}", e),
-                        };
-                    }
-                }
+                let workspace = self.active_workspace();
+                self.spawn_add_local_project(path, workspace);
             }
             InputAction::RenameSession { session_id } => {
                 let new_title = value.trim().to_string();
@@ -2812,78 +2953,48 @@ impl App {
             InputAction::ScanDirectory => {
                 let expanded = crate::path_completer::expand_tilde(value.trim());
                 let path = PathBuf::from(expanded);
-                if !path.exists() {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Path does not exist: {}", path.display()),
-                    };
-                    return;
-                }
                 if !path.is_dir() {
                     self.ui_state.modal = Modal::Error {
                         message: format!("Not a directory: {}", path.display()),
                     };
                     return;
                 }
-
-                // If the path itself is a git repo, just add it directly
+                let workspace = self.active_workspace();
                 if path.join(".git").exists() {
-                    match self.local_arc().add_project(path).await {
-                        Ok(project_id) => {
-                            self.ui_state.status_message = Some((
-                                format!("Added project {}", project_id),
-                                Instant::now() + Duration::from_secs(3),
-                            ));
-                            self.refresh_local_view().await;
-                            self.refresh_list_items().await;
-                            self.select_project_in_sidebar(project_id);
-                        }
-                        Err(e) => {
-                            self.ui_state.modal = Modal::Error {
-                                message: format!("Failed to add project: {}", e),
-                            };
-                        }
-                    }
+                    self.spawn_add_local_project(path, workspace);
                     return;
                 }
-
-                // Show loading modal
-                self.ui_state.modal = Modal::Loading {
-                    title: "Scanning".to_string(),
-                    message: format!("Scanning {} for git repos…", path.display()),
-                    hint: None,
-                };
-
-                // Local-only this phase for the same reason as add-project above:
-                // the scanned directory is a local filesystem path. Remote
-                // scan/add routing is deferred until a server-side path picker
-                // exists.
-                match self.local_arc().scan_directory(path.clone()).await {
-                    Ok(result) => {
-                        if result.added == 0 && result.skipped == 0 {
-                            self.ui_state.modal = Modal::Error {
-                                message: format!("No git repositories found in {}", path.display()),
-                            };
-                        } else {
-                            self.ui_state.modal = Modal::None;
-                            self.ui_state.status_message = Some((
-                                format!(
-                                    "Added {} project{} ({} already existed)",
+                self.ui_state.modal = Modal::None;
+                self.ui_state.status_message = Some((
+                    format!("Scanning {} for git repos…", path.display()),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.local_arc();
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let message = backend
+                        .scan_directory(path.clone(), workspace)
+                        .await
+                        .map_err(|e| format!("Failed to scan directory: {e}"))
+                        .and_then(|result| {
+                            if result.added == 0 && result.skipped == 0 {
+                                Err(format!("No git repositories found in {}", path.display()))
+                            } else {
+                                Ok(format!(
+                                    "Added {} project{}, skipped {} existing",
                                     result.added,
                                     if result.added == 1 { "" } else { "s" },
-                                    result.skipped,
-                                ),
-                                Instant::now() + Duration::from_secs(5),
-                            ));
-                            self.refresh_local_view().await;
-                            self.refresh_list_items().await;
-                        }
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Scan failed: {}", e),
-                        };
-                    }
-                }
+                                    result.skipped
+                                ))
+                            }
+                        });
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::ActionFinished {
+                            backend_id: LOCAL_BACKEND_ID.0,
+                            message,
+                        }))
+                        .await;
+                });
             }
             InputAction::AddRemoteServerName => {
                 let name = value.trim().to_string();
@@ -2974,6 +3085,11 @@ impl App {
                     token: (!token.is_empty()).then(|| token.to_string()),
                 };
                 self.spawn_remote_server_probe(server);
+            }
+            InputAction::NewWorkspace => {
+                if let Some(name) = self.create_workspace(&value).await {
+                    self.switch_workspace(Some(name), true).await;
+                }
             }
             InputAction::CloneDestName { backend, source } => {
                 // Blank means "derive the name from the source" — a real choice,
@@ -3152,8 +3268,11 @@ impl App {
                 ));
                 let handle = self.backend_arc(backend);
                 let tx = self.event_loop.sender();
+                // `ensure` tags only a project it newly registers, so an
+                // already-registered checkout keeps its workspace.
+                let workspace = self.active_workspace();
                 tokio::spawn(async move {
-                    let update = match handle.ensure_project(dest).await {
+                    let update = match handle.ensure_project(dest, workspace).await {
                         Ok(project_id) => StateUpdate::ProjectAdded {
                             backend_id: backend.0,
                             project_id,

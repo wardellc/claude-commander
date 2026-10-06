@@ -242,6 +242,38 @@ dim_unfocused_opacity = 0.4
 # below (so the block acts as a view, not a duplicate). Set to 0 to hide it.
 # recent_sessions_limit = 5
 
+# Workspaces: named groups of projects (see "Workspaces" below). Array order is
+# display order; the built-in Main workspace (untagged projects) is implicit and
+# never listed.
+#
+# [[workspaces]]
+# name = "Work"
+#
+# [[workspaces]]
+# name = "Personal"
+#
+# Label for the built-in Main workspace (default label "Main").
+#
+# [main_workspace]
+# name = "Home"
+#
+# Which workspace to open on: "last" (default — whichever this client last had
+# active), "main", or a workspace name (falls back to Main if it no longer
+# exists).
+# startup_workspace = "last"
+#
+# Per-workspace TUI themes, keyed by workspace name; the built-in Main
+# workspace's key is always "main", whatever its label (see "Workspace themes"
+# below). Each table takes the same keys as [theme]. Without `preset` it layers
+# its colours over your usual [theme]; with `preset` it starts from that preset
+# and only its own colours apply.
+#
+# [workspace_themes."Work"]
+# text_accent = "#e5a50a"
+#
+# [workspace_themes.main]
+# preset = "basic"
+
 # Interval in milliseconds for syncing state file changes from other instances (0 = disabled)
 state_sync_interval_ms = 2000
 
@@ -282,11 +314,12 @@ state_sync_interval_ms = 2000
 # speak_scope = "prose_only"               # prose_only | verbatim (per-sentence, streamed)
 # volume = 1.0                             # 0.0–2.0
 
-# Voice input (speech-to-text): hold a conversation by talking. Toggle recording
-# with `Alt-v`, then it's transcribed via an OpenAI-compatible STT engine and sent
-# to the conversation agent. See "Voice input (STT)" below.
+# Voice input (speech-to-text): talk instead of typing. Toggle recording with
+# `Alt-v` to send the transcript to the conversation agent, or with `Alt-t` to
+# type it into the pane you're attached to. Either way it's transcribed via an
+# OpenAI-compatible STT engine. See "Voice input (STT)" and "Dictation (Alt-t)".
 # [stt]
-# enabled = true                          # master switch for Alt-v voice input (off by default)
+# enabled = true                          # master switch for Alt-v / Alt-t voice input (off by default)
 # base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
 # model = "Systran/faster-whisper-base"    # transcription model name
 # language = "en"                          # ISO-639-1 hint; omit to auto-detect
@@ -295,6 +328,7 @@ state_sync_interval_ms = 2000
 # input_device = "..."                     # microphone to capture from; omit for the system default
 # pause_media = true                       # pause other players while recording, resume after the
 #                                          # reply (best-effort via playerctl/osascript; on by default)
+# dictation_submit = "never"               # never | agent | always — press Enter after a dictated transcript?
 
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
@@ -318,6 +352,11 @@ state_sync_interval_ms = 2000
 # set_session_base = ["B"]                 # palette-only by default; bind a key here
 # toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
 # reset_session = ["Ctrl-r"]               # palette-only by default; bind a key here
+# next_workspace = ["w"]                  # cycle workspaces (wraps)
+# workspace_picker = ["W"]                 # switch / create a workspace
+# previous_workspace = []                  # palette-only by default; bind a key here
+# new_workspace = []                       # palette-only by default
+# move_project_to_workspace = []           # palette-only by default
 
 # Remote claude-commander servers. Each entry adds a server node to the
 # session tree with that server's projects and sessions under it (full
@@ -332,7 +371,45 @@ state_sync_interval_ms = 2000
 # url = "http://buildbox:7878"   # base URL of claude-commander-server
 # token = "..."                  # bearer token; omit only for servers
 #                                # started with --allow-no-auth (loopback)
+
+# Serving THIS machine's sessions over HTTP. The same table is read by the
+# standalone `claude-commander-server` binary and by the TUI, which runs the
+# server inside its own process when `auto_start` is on (or `--serve` is
+# passed) and takes it down when it exits. Editable from the in-app settings
+# modal: Settings > Server.
+# [server]
+# auto_start = true              # serve for as long as the TUI is open
+# bind = "127.0.0.1"             # "0.0.0.0" to accept clients from the LAN
+# port = 7878
+# token = "..."                  # generated and written here on first serve
+# cors_allowed_origins = []      # origins a browser may call /api from
 ```
+
+### Serving this machine (`[server]`)
+
+Wanting the server on the same machine as the TUI is the common case, and having to
+remember to start it separately is friction — so `auto_start = true` brings it up
+with the TUI. It runs *inside* the TUI process and shares its session manager, so
+there is one set of background pollers, one writer to `state.json` and one
+telemetry stream, and the listener goes away exactly when the TUI does. A `⇅ 7878`
+chip in the status bar confirms it came up.
+
+Everything under `[server]` is read once at startup, so changing it needs a
+restart — the status bar says so after an edit. If the port is already taken (most
+often because a standalone `claude-commander-server` is already running) the TUI
+carries on without serving: the chip reads `⇅ server unavailable`, and the reason
+appears once in the status bar and in the log.
+
+The bind address defaults to loopback, so out of the box nothing off this machine
+can reach it; set `bind = "0.0.0.0"` for a phone or another desktop on the LAN.
+Authentication is never optional here: if `token` is unset, the first serve
+generates one and writes it back to this file so a paired client keeps working
+across restarts. Use the palette's **Copy server token** to hand it to a client —
+the settings modal deliberately shows only whether a token is set, never its
+value, and the copy reports the URL in the status bar rather than putting the
+secret in your scrollback. (The standalone binary differs: it logs a one-time
+token instead of persisting one, since a managed deployment's config file may be
+read-only.)
 
 A remote server's `token` is **operator-equivalent**: anyone holding it can create
 sessions (which run arbitrary programs on that machine) and address projects by
@@ -400,7 +477,7 @@ whole reply. A new message interrupts in-flight speech. If the TTS server is unr
 still works (text-only) and never blocks the UI.
 
 `enabled` is the master switch for the whole feature and is **off by default** — set it (in
-Settings ▸ Conversation or config) before `Alt-c` will open the overlay. We develop against a
+Settings ▸ Voice or config) before `Alt-c` will open the overlay. We develop against a
 local [Kokoro](https://github.com/sizeak/kokoro-tts-rocm) container (default
 `http://127.0.0.1:8002/v1`), but any OpenAI-compatible endpoint works.
 
@@ -443,15 +520,17 @@ and sends the resulting text to the conversation session — exactly as if you'd
 then streams back and is spoken aloud (if TTS is enabled). Voice input works **whether the overlay
 is open or not**, mirroring spoken replies.
 
-`stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. Voice
-input feeds the conversation session, so it's only useful alongside conversation mode. Microphone
-capture uses `cpal` (PipeWire/ALSA on Linux — see the build note above). If no microphone is available
-or the STT server is unreachable, voice input degrades gracefully (a status message) and never
-blocks the UI.
+`stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. It is the
+master switch for *both* uses of the microphone: `Alt-v` (this section, which does need conversation
+mode, since that's where the transcript goes) and `Alt-t` ([dictation](#dictation-alt-t), which
+types the transcript into the attached pane or the open dialog's text field, and needs no
+conversation session at all). Microphone capture uses `cpal` (PipeWire/ALSA on Linux — see the
+build note above). If no microphone is available or the STT server is unreachable, voice input
+degrades gracefully (a status message) and never blocks the UI.
 
 ```toml
 [stt]
-enabled = true                          # master switch for Alt-v voice input (off = no voice input)
+enabled = true                          # master switch for Alt-v / Alt-t voice input (off = no mic)
 base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
 model = "Systran/faster-whisper-base"    # transcription model name
 language = "en"                          # ISO-639-1 hint; omit to auto-detect
@@ -459,12 +538,13 @@ language = "en"                          # ISO-639-1 hint; omit to auto-detect
 # api_key = "..."                        # sent as a Bearer header; omit for local servers
 # input_device = "alsa_input.pci-0000_c1_00.6.analog-stereo"  # device id; omit for the system default
 pause_media = true                       # pause other players while recording, resume after the reply
+dictation_submit = "never"               # never | agent | always — press Enter after a dictated transcript?
 ```
 
 `input_device` picks which microphone to capture from — omit it (or leave it as **(default)**
-in Settings ▸ Conversation) to use the system default. Set it from the **STT Microphone** picker
-in the settings modal, which lists each device by a friendly name; monitor/loopback sources (e.g.
-recording your speakers) are tagged **(loopback)**. The value stored is cpal's stable device *id*
+in Settings ▸ Voice) to use the system default. Set it from the **Microphone** picker under
+**Transcription** in the settings modal, which lists each device by a friendly name;
+monitor/loopback sources (e.g. recording your speakers) are tagged **(loopback)**. The value stored is cpal's stable device *id*
 (the PipeWire `node.name`, e.g. `alsa_input.pci-…`), not the friendly name — because a mic and its
 speaker's loopback can share a name, so ids are what uniquely identify a device. If the configured
 device isn't present when recording starts, capture falls back to the default (with a warning)
@@ -475,11 +555,100 @@ While you're recording (and until the assistant has finished its spoken reply), 
 pauses any other media players so they don't talk over the conversation, then resumes whatever was
 playing once things go quiet. It's best-effort — `playerctl` on Linux, `osascript` (Spotify/Music)
 on macOS — and a silent no-op when neither is available, so it never blocks or breaks voice input.
-On by default; set to `false` to leave your media alone.
+On by default; set to `false` to leave your media alone. Unlike the microphone, changing it takes
+a restart once voice input is running — the settings row says "(restart to apply)" until then.
 
 Audio is captured at the microphone's native rate, downmixed to mono, and encoded as 16-bit PCM
 WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded
 when you stop — so very long dictations wait until the end to transcribe.
+
+### Dictation (Alt-t)
+
+`Alt-v` sends what you said to the *conversation agent*. **`Alt-t`** sends it to *where you're
+typing*: it records the microphone, transcribes it through the same `[stt]` engine, and types the
+result into the attached pane — an agent's prompt, a shell command line, local session or remote —
+or, outside a pane, into the open dialog's text field (see below). It's the same toggle shape as
+`Alt-v` (press to start, press to stop), and either key stops a recording the other started,
+because there is only one microphone.
+
+What is fixed **when recording starts** is the *destination kind*: a recording begun with `Alt-t`
+is typed into a pane even if `Alt-v` is the key that stops it, and vice versa. *Which* pane is
+decided when the text is typed, because it is delivered through the attach stream itself — the same
+channel your keystrokes travel — rather than a server route. So it follows the client: if
+`Ctrl-Space` moves you to another session mid-recording, the transcript lands in the pane you are
+looking at when it arrives, and dictating into a remote session needs nothing installed on the
+server.
+
+While you dictate, the attached client's tmux status line shows **● Dictating… (Alt-t to type)**
+and keeps showing it until you press a key (the `Alt-t` that stops recording counts); it is then
+replaced by **● Transcribing…**, which in turn is replaced by a brief **✓ Typed** as the text
+lands — or **✗ Nothing heard** / **✗ Transcription failed: …** if it doesn't. `Alt-v` gets the
+same held **● Recording…** notice, retired by *✓ Sent to <assistant>*. For a remote session these
+notices are best-effort: they target your local tmux by the session's name.
+
+It also works **outside a pane**, into any open dialog's text field: a review comment being
+written, the new-session name, the conversation overlay's input, the quick-switch and branch
+search boxes, a path prompt. The text is inserted at the cursor exactly as a paste would be, and
+nothing is ever submitted there — `dictation_submit` applies to panes only, because a dialog's
+Enter commits it. The status bar shows the same **● Dictating…** → **● Transcribing…** → **✓ Typed**
+progression; the full-screen views that cover it show it themselves — the review view in its
+footer beside the comment's save/cancel, the conversation overlay in its input row and the rule
+beneath it. A masked field (a server's bearer token) is excluded: a secret is not something to read
+aloud to a transcription server.
+
+Pressed with neither — the bare session list — there is nowhere to type, so it says *"Open a text
+field or attach to a session to dictate"* and records nothing. It also refuses to start in the
+in-session switcher, whose search box sits over a live pane. A transcript is placed wherever is on
+screen *when it arrives*: stop a recording after the dialog has closed (or after you've detached)
+and it is dropped with the same message rather than typed into whatever comes next. A pane wins
+while one is attached — but a recording *started* in a dialog is never submitted, even if it ends
+up typed into a pane you attached to while it was transcribing: `dictation_submit` only applies to
+dictation you started in the pane.
+
+#### What gets typed
+
+The transcript is normalised to a single line before it is typed: every newline becomes a space.
+A pane is a terminal, so a literal newline is not whitespace — it is Enter, and it would submit a
+half-finished sentence in the middle of dictation. Transcription engines return trailing newlines
+routinely, so this runs on every transcript. An empty result (silence) types nothing at all.
+
+By default nothing is submitted — the text sits in the composer and you press Enter yourself, after
+reading it. Transcription mishears, and one keystroke is a cheap price for never running a command
+nobody said. `dictation_submit` under `[stt]` trades that review step for hands-free operation:
+
+| Value | Behaviour |
+|-------|-----------|
+| `never` (default) | Type the text and stop. You press Enter |
+| `agent` | Also press Enter on an **agent** pane, where a wrong submit costs a turn. A shell pane stays insert-only |
+| `always` | Press Enter on **any** pane, shell included — so a misheard sentence is a command that runs. Choose it deliberately |
+
+When it does submit, the Enter follows the text after whatever per-harness delay that agent needs
+to read the typed text as its own keystrokes first (Codex needs one; the others don't). Change the
+policy from **Settings ▸ Voice ▸ Transcription ▸ Dictation Submit** and it applies to the next
+recording, live — no restart.
+
+#### The keys it shadows
+
+Unlike `Alt-v`, which is only intercepted on agent panes, `Alt-t` is intercepted on **shell panes
+too** — dictating a command line is half the point. The cost is that the pane never sees the key:
+
+- In a shell, it shadows readline's `transpose-words` (`Alt-t` swaps the two words around the
+  cursor). If you use that, rebind dictation.
+- In a Claude Code pane, it shadows Claude Code's own `Alt+T`, *toggle extended thinking*
+  (its [keyboard-shortcuts table](https://code.claude.com/docs/en/interactive-mode.md#keyboard-shortcuts);
+  those docs note the shortcut has no effect on Fable models).
+
+Rebind it like any other action — it's `toggle_dictation`, in the **Review & AI** group of the
+keybindings tab:
+
+```toml
+[keybindings]
+toggle_dictation = ["Alt-x"]
+```
+
+> **Not yet:** the `listen-toggle` desktop hotkey below still drives `Alt-v`'s recording only —
+> there is no `listen-toggle --dictate` for starting a dictation from outside the terminal. Nor is
+> the submit policy settable per session; it's one config value for the whole app.
 
 ### Global voice hotkey
 
@@ -563,6 +732,14 @@ Accent** (`,` key).
 
 Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on top of the chosen preset.
 
+In **Settings ▸ Theme** (`,` key) every colour row opens a swatch picker: the
+current theme's colours in a grid (arrows or `h`/`j`/`k`/`l`, `Enter` to pick), plus
+a hex row that takes a typed or pasted `#rrggbb` (`Tab` or `#` to reach it). The
+first cell, **Inherit**, clears the row's own value so it falls back to the preset
+again. A row with no value of its own shows the inherited one dim, marked
+`(preset)`. The picker writes `#rrggbb`; a named (`"red"`) or indexed (`117`) value
+still works when written in `config.toml` by hand.
+
 ### Light terminals
 
 Every preset above is designed for a **dark** terminal background. On a light one, declare it:
@@ -582,6 +759,130 @@ Nothing detects this for you — querying the terminal background (`OSC 11`) is 
 scope — so it is a claim you make about your own terminal. Leaving it unset keeps whatever the
 preset declares, which is `dark` for all of them. Editable in-app from **Settings ▸ Theme ▸
 Appearance** (`,` key); clear the field to fall back to the preset.
+
+## Workspaces
+
+A workspace is a **label on a project**. Every workspace shares one state file,
+one server and one set of background loops; switching workspace only changes
+which projects and sessions a frontend shows. A project with no label is in the
+built-in **Main** workspace, which can be relabelled (`[main_workspace]`) but not
+deleted. Workspace UI stays hidden until a second workspace exists.
+
+- Definitions live in `config.toml` as `[[workspaces]]` (`name`); a project's workspace is stored with the project in
+  `state.json`. Names are trimmed, at most 40 characters, contain no control
+  characters, and may not be `last` or `main` (any case) — those are the
+  non-name values of `startup_workspace`.
+- **Renaming** a workspace rewrites every project tagged with it (and a
+  `startup_workspace` pinned to it); **deleting** one moves its projects back to
+  Main. Both go through the app (or the server's API) rather than a hand edit of
+  `config.toml`, because a hand-edited rename would strand the projects under
+  the old name. A project whose workspace has no definition still shows up —
+  under a workspace of that name — and moving a project into an undefined
+  workspace defines it.
+- With remote servers, definitions **merge by name**: the local server's order
+  (the TUI) or the first server's order (the Flutter app) comes first, and names
+  only another server defines are appended. Main merges by being untagged, never
+  by its label. Each server stores its own projects' labels and definitions;
+  creating, renaming, deleting and reordering is sent to every connected server.
+  Merging is exact, but a server refuses two names that differ only in case (or
+  a name equal to its Main label), so if two servers ended up with "Work" and
+  "work" each is sent the list with its own spelling kept and the other's
+  dropped — the disagreement never blocks an edit. Rename one to reconcile.
+- An older binary that rewrites `state.json` or `config.toml` drops the
+  workspace fields it does not know (those projects fall back to Main). From
+  this version on, unknown project fields in `state.json` are preserved.
+
+In the TUI:
+
+- `w` (`next_workspace`) cycles workspaces, wrapping; `W` (`workspace_picker`)
+  opens a picker listing each workspace with its count of sessions waiting for
+  input, where typing a name that doesn't exist creates it. **Previous
+  workspace**, **New workspace…** and **Move project to workspace…** are
+  palette-only until you bind them under `[keybindings]`.
+- The active workspace scopes the list views, the board and its project
+  sidebar, the Recent block and the status-bar counts. Switching lands on the
+  first row and clears a board project filter. The palette and the in-session
+  `Ctrl-Space` switcher search every workspace — the active one's sessions
+  first, the rest tagged — and picking a session elsewhere switches there first.
+- The status bar shows a chip naming the workspace and `Label ●N` hints
+  for other workspaces with sessions waiting, each in its workspace's theme
+  accent (see [Workspace themes](#workspace-themes)); the board header and an attached
+  session's tmux status line carry the name. All of it is hidden while there is
+  only one workspace.
+- New projects, clones and directory scans go into the active workspace (in
+  the Flutter app too — `POST /projects/scan` takes the same optional
+  `workspace` as `POST /projects`).
+- The active workspace is per client, remembered in `tui.json`
+  (`last_workspace`) and applied at startup when `startup_workspace = "last"`.
+- **Settings → Workspaces** edits everything above: `n` new, `r` rename
+  (Main's label included), `d` delete (not Main), `J`/`K` reorder, `s` cycle
+  the startup workspace, and `→`/`Enter` into a workspace's details, where
+  `Enter` on **Theme** edits its theme and `m` moves a listed project. Every change is sent to each connected server at once; a server that
+  refuses or can't be reached is named in a status message, and the rest
+  still apply it. `startup_workspace` is saved to the local config only, and
+  changing it leaves the local definitions as they are (a pinned workspace only
+  another server defines is added locally, since the pin needs a definition).
+
+From the CLI:
+
+```sh
+claude-commander list --workspace work        # only sessions in "Work"
+claude-commander list --workspace main        # only Main (or use Main's label)
+claude-commander new fix-login -d ~/src/app --workspace work
+```
+
+`list` adds a `[workspace]` column to each project line once there is more than
+one workspace; `list --json` always carries a `workspace` field (`null` for
+Main).
+`new --workspace` requires `--path`: it applies only when that path registers a
+new project — an existing project keeps its workspace — and an unknown name
+creates the workspace.
+
+### Workspace themes
+
+Each workspace can have its own TUI theme in the local `config.toml`, under
+`[workspace_themes."<name>"]`. The table takes the same keys as `[theme]`:
+
+- no table for a workspace → it uses your usual `[theme]`;
+- a table without `preset` → the usual theme, with the table's colours on top;
+- a table with `preset` → that preset plus only the table's own colours (the
+  usual `[theme]` overrides do not carry over).
+
+The built-in Main workspace has no name of its own (its label can change), so
+its theme is always keyed **`main`** — `[workspace_themes.main]`. No user
+workspace can be called `main` (in any case), so the key cannot collide.
+
+Switching workspace re-themes the whole TUI at once, and a config hot reload
+rebuilds the active workspace's theme. The status-bar chip naming the active
+workspace is drawn in its theme's `text_accent` (with black or white text,
+whichever reads), and each `Label ●N` hint for another workspace in *that*
+workspace's `text_accent`, as are the swatches in **Settings ▸ Workspaces**. While
+there is only one workspace the usual `[theme]` is the one worn and edited, and a
+leftover `[workspace_themes.main]` is ignored until a second workspace exists.
+
+To edit one in the app, open **Settings ▸ Theme**. Once there are two or more
+workspaces its first row, **Theme for**, picks what the tab edits: a workspace
+(the active one by default) or **Usual theme (all workspaces)**, i.e. `[theme]`.
+In a workspace's scope:
+
+- **Reset to usual theme** removes the workspace's table;
+- **Preset** is `(usual)` to layer over the usual theme, or a preset to start a
+  new base from;
+- every colour row opens the swatch picker, whose **Inherit** cell clears the
+  workspace's own value. Inherited rows are shown dim, marked `(usual)` when
+  they come from the usual theme and `(preset)` when the workspace has a preset
+  of its own. A table left with nothing in it is removed.
+
+**Settings ▸ Workspaces** shows each workspace's **Theme** as `usual` or
+`customised`; `Enter` on it opens the Theme tab scoped to that workspace.
+
+Themes are local to the machine running the TUI: they are not sent to servers,
+a server's `GET /config` leaves them out, and they cannot be set through the
+server's config API. Renaming a workspace in the app moves its table to the new
+name (replacing any leftover table already under that name, which the renamed
+workspace now owns) and deleting one removes it — including a workspace only a
+remote server defines. A hand edit of a workspace's name in
+`config.toml` does not, so rename through the app.
 
 ## Session List Sections
 

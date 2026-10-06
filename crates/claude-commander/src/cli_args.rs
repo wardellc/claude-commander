@@ -28,6 +28,18 @@ pub struct Cli {
     #[arg(short, long)]
     pub config: Option<std::path::PathBuf>,
 
+    /// Run the HTTP server in this process for as long as the TUI is open, so
+    /// clients on this machine (or the LAN, with `[server] bind`) can reach it
+    /// without starting `claude-commander-server` separately. Overrides
+    /// `[server] auto_start` for one run. TUI only.
+    #[arg(long, conflicts_with = "no_serve")]
+    pub serve: bool,
+
+    /// Do not run the HTTP server, even if `[server] auto_start` is on.
+    /// TUI only.
+    #[arg(long)]
+    pub no_serve: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -51,6 +63,11 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Only list sessions in this workspace (by name, case-insensitive;
+        /// `main` or Main's label for the built-in workspace).
+        #[arg(short = 'w', long)]
+        workspace: Option<String>,
     },
 
     /// Show detailed status of a session
@@ -150,6 +167,12 @@ pub enum Commands {
         /// new one (the path is resolved on the server, not this machine).
         #[arg(long)]
         remote: Option<String>,
+
+        /// Workspace for the project when `--path` registers a new one (an
+        /// existing project keeps its workspace). An unknown name creates the
+        /// workspace; `main` is the built-in one.
+        #[arg(short = 'w', long, requires = "path")]
+        workspace: Option<String>,
     },
 
     /// Attach to an existing session

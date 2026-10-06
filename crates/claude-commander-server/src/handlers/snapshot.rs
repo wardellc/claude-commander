@@ -1,7 +1,7 @@
 //! Workspace-surface handlers.
 //!
 //! Thin wrappers over `CommanderService`: the whole-workspace snapshot the
-//! session tree renders from (`workspace_snapshot`), the bulk agent-state poll
+//! session tree renders from (`snapshot`), the bulk agent-state poll
 //! (`agent_states`), and the new-session dialog options (`create_options`).
 
 use axum::{
@@ -9,15 +9,15 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
 };
-use claude_commander_core::api::{AgentStatesSnapshot, CreateOptions, WorkspaceSnapshot};
+use claude_commander_core::api::{AgentStatesSnapshot, CreateOptions, Snapshot};
 use serde::Deserialize;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// `GET /workspace` → `workspace_snapshot`.
-pub async fn snapshot(State(state): State<AppState>) -> Result<Json<WorkspaceSnapshot>, ApiError> {
-    Ok(Json(state.service.workspace_snapshot().await?))
+/// `GET /workspace` → `snapshot`.
+pub async fn snapshot(State(state): State<AppState>) -> Result<Json<Snapshot>, ApiError> {
+    Ok(Json(state.service.snapshot().await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +48,30 @@ pub async fn pr_refresh(State(state): State<AppState>) -> Result<StatusCode, Api
     Ok(StatusCode::ACCEPTED)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangesQuery {
+    pub since: Option<u64>,
+}
+
+/// Bootstrap a generation, or wait for observable changes without transferring
+/// another full workspace. Subscribe before comparing to avoid lost wakeups.
+pub async fn changes(
+    State(state): State<AppState>,
+    Query(query): Query<ChangesQuery>,
+) -> Json<u64> {
+    let mut feed = state.service.store().subscribe();
+    let current = *feed.borrow_and_update();
+    if query.since == Some(current) {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(claude_commander_protocol::CHANGE_WAIT_SECS),
+            feed.changed(),
+        )
+        .await;
+    }
+    let generation = *feed.borrow();
+    Json(generation)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{Router, routing::get};
@@ -63,7 +87,7 @@ mod tests {
             .with_state(test_state(&dir));
         let (status, body) = do_get(router, "/workspace").await;
         assert_eq!(status, 200);
-        let snap: claude_commander_core::api::WorkspaceSnapshot = json(&body);
+        let snap: claude_commander_core::api::Snapshot = json(&body);
         assert!(snap.projects.is_empty());
         assert!(snap.sessions.is_empty());
         assert!(snap.cascade_paused.is_none());

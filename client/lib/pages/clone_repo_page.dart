@@ -7,9 +7,8 @@ import '../state/commander_store.dart';
 import '../theme/tokens.dart';
 import '../util/error_text.dart';
 
-/// How often a running clone job is polled. Flat, with no backoff: a job is
-/// already bounded server-side by `clone_timeout_secs`, so there is no runaway
-/// to protect against, and a clone the user is watching should feel live.
+/// Reconciliation timeout while watching a clone. Server change notifications
+/// wake the wait early; this deadline also supports servers without the feed.
 const _pollInterval = Duration(seconds: 1);
 
 /// Prefix characters a client-derived directory name may contain. Deliberately
@@ -56,7 +55,11 @@ final _safeDirName = RegExp(r'^[A-Za-z0-9._][A-Za-z0-9._-]*$');
 class CloneRepoPage extends StatefulWidget {
   final CommanderStore store;
 
-  const CloneRepoPage({super.key, required this.store});
+  /// The workspace the cloned (or registered-existing) project lands in — the
+  /// app's active one. Null is Main.
+  final String? workspace;
+
+  const CloneRepoPage({super.key, required this.store, this.workspace});
 
   @override
   State<CloneRepoPage> createState() => _CloneRepoPageState();
@@ -120,9 +123,9 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       _host ??
       CodeHost(
         provider:
-            _store.workspace?.server.codeHost.provider ??
+            _store.snapshot?.server.codeHost.provider ??
             CodeHostProvider.github,
-        hostname: _store.workspace?.server.codeHost.hostname,
+        hostname: _store.snapshot?.server.codeHost.hostname,
       );
 
   bool get _busy => _flowActive;
@@ -131,7 +134,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
   void initState() {
     super.initState();
     // The badge depends on the project list, which may still be loading when
-    // this page opens (the workspace snapshot lands asynchronously). Listening
+    // this page opens (the snapshot lands asynchronously). Listening
     // means the badges fill in when it arrives rather than being permanently
     // absent for anyone who got here quickly.
     _store.addListener(_onStoreChanged);
@@ -325,6 +328,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
           // whitespace-only entry would be refused with a 400, so normalise it
           // to the same thing.
           destName: destName.trim().isEmpty ? null : destName.trim(),
+          workspace: widget.workspace,
         ),
       );
     } catch (e) {
@@ -341,7 +345,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
       while (true) {
         switch (current.status.kind) {
           case CloneStatusKind.running:
-            await Future<void>.delayed(_pollInterval);
+            await _store.waitForChange(_pollInterval);
             if (!mounted) return _Attempt.done;
             final CloneJobDto? polled;
             try {
@@ -426,8 +430,7 @@ class _CloneRepoPageState extends State<CloneRepoPage> {
     if (!mounted) return _Attempt.done;
     if (register != true) return _Attempt.rename;
     try {
-      await _store.ensureProject(dest);
-      await _store.refresh();
+      await _store.ensureProject(dest, workspace: widget.workspace);
       if (!mounted) return _Attempt.done;
       Navigator.of(context).pop(true);
     } catch (e) {

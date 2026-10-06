@@ -133,6 +133,17 @@ written to plain shared preferences.
 - **Cascade / push-stack** — triggered from the session detail view with their
   operation outcome reported (`cascadeMerge`/`pushStack`); a paused cascade shows
   a global resume/abandon banner (`cascadeResume`/`cascadeAbandon`).
+- **Themes** — Mission Control or LCARS, plus per-role colour overrides
+  (primary, working, attention, …) picked from theme swatches, a hex field or
+  the clipboard. With two or more workspaces, each can have its own theme
+  (a preset and/or overrides) over the usual one, applied live on a workspace
+  switch. In a workspace's scope the picker marks the preset it inherits
+  `USUAL` rather than checking it, with a **Pin this preset** button that pins
+  it (shedding the usual overrides); **Inherit usual preset** unpins a preset
+  while keeping the workspace's overrides. All of it is per device
+  (`shared_preferences`), keyed by workspace name: a rename made on this device
+  moves the key, a rename made elsewhere leaves the workspace on the usual
+  theme. See `lib/theme/theme_prefs.dart`.
 - **Window modes** (desktop) — fullscreen, a borderless frame where the app draws
   its own themed window bar, and a window size/position remembered across
   launches. See [Window modes](#window-modes).
@@ -468,7 +479,7 @@ cargo build                            # verify the cdylib still compiles
 
 Commit the regenerated files (`client/lib/src/rust/` and `client/rust/src/frb_generated.rs`) together with the Rust changes. The generated files are checked in so contributors without the full toolchain can still run `flutter analyze` and widget tests.
 
-> `flutter_rust_bridge_codegen` is provided by the dev shell. If it is ever absent from the nixpkgs pin, install it with `cargo install flutter_rust_bridge_codegen --version 2.11.1`.
+> **Use codegen 2.11.1, which the `.#client` dev shell does not provide.** The runtime is pinned to `=2.11.1` (`client/rust/Cargo.toml`, `pubspec.yaml`), but the shell's `flutter_rust_bridge_codegen` comes from the nixpkgs pin and is 2.13.0 (`nix develop .#client -c flutter_rust_bridge_codegen --version`), and the generated glue stamps the codegen version that wrote it (`frb_generated.rs:39`, `frb_generated.dart:74`) — how a 2.13.0 regeneration fails against the 2.11.1 runtime is untested, so don't find out in a commit. Install the matching one with `cargo install flutter_rust_bridge_codegen --version 2.11.1` and run it by path (`~/.cargo/bin/flutter_rust_bridge_codegen`), since the dev shell's copy is first on `PATH`. `.#clientCi` carries no codegen at all. Bumping the runtime to the shell's version is the other fix, and a bigger change.
 
 ## Testing
 

@@ -31,7 +31,7 @@ pub use attach::{
     AttachConnection, AttachEnd, AttachRefresher, AttachResizer, AttachStreams, AttachTerminator,
 };
 pub use backoff::{BackoffConfig, backoff_delay};
-pub use client::{RemoteClient, ScanResponse};
+pub use client::RemoteClient;
 pub use error::{ClientError, ClientResult};
 pub use poller::{ConnectionFeed, PollConfig, Poller, spawn_poller};
 pub use spec::{RemoteServerSpec, SecretString};
@@ -40,3 +40,6 @@ pub use spec::{RemoteServerSpec, SecretString};
 /// `claude-commander-protocol` (which owns the definition) and, in turn, by
 /// `claude-commander-core::backend`, so all three crates share one type.
 pub use claude_commander_protocol::connection::ConnectionState;
+
+#[cfg(test)]
+mod test_server;

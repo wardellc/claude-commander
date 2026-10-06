@@ -10,12 +10,15 @@
 //! to mobile targets.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use claude_commander_protocol::api::{
-    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail, SetProgramsRequest,
-    SetSessionBase, SetSessionBaseOutcome, ToggleReviewed, WorkspaceSnapshot,
+    AddProjectRequest, AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions,
+    CreateSessionOpts, CreatedId, DiffSide, MarkUnread, NewComment, OperationStatus, PatchSession,
+    PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedToggle, ScanResponse,
+    SessionDetail, SetProgramsRequest, SetSection, SetSessionBase, SetSessionBaseOutcome, Snapshot,
+    ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
@@ -23,6 +26,9 @@ use claude_commander_protocol::hosting::{
     CodeHost, CodeHostProvider, HostedRepository, RepositoryListing,
 };
 use claude_commander_protocol::session::{ProjectId, SessionId};
+use claude_commander_protocol::workspace::{
+    DeleteWorkspaceRequest, RenameWorkspaceRequest, SetProjectWorkspace, SetWorkspacesRequest,
+};
 use claude_commander_protocol::ws::AttachKind;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
@@ -94,11 +100,32 @@ const REPO_LIST_TIMEOUT: Duration =
 /// client, the resolved base URL, and the (redacted) bearer token. Cloneable via
 /// `Arc`; the poll task holds an `Arc` of this — never of the adapter backend —
 /// so there's no cycle.
+#[derive(Default)]
+struct SnapshotCache {
+    epoch: u64,
+    fetched_at: Option<std::time::Instant>,
+    workspace: Option<Snapshot>,
+    agents: Option<AgentStatesSnapshot>,
+}
+
+impl SnapshotCache {
+    fn expire(&mut self) {
+        if self
+            .fetched_at
+            .is_some_and(|at| at.elapsed() > Duration::from_secs(2))
+        {
+            self.workspace = None;
+            self.agents = None;
+        }
+    }
+}
+
 pub struct RemoteClient {
     name: String,
     client: Client,
     base: Url,
     token: Option<SecretString>,
+    snapshots: Mutex<SnapshotCache>,
 }
 
 impl RemoteClient {
@@ -134,6 +161,7 @@ impl RemoteClient {
             client,
             base,
             token: spec.token,
+            snapshots: Mutex::new(SnapshotCache::default()),
         })
     }
 
@@ -145,7 +173,7 @@ impl RemoteClient {
     /// The `/ws/attach` WebSocket URL for this server (scheme mapped, path
     /// prefix preserved).
     fn ws_attach_url(&self) -> String {
-        crate::attach::ws_attach_url(self.base.as_str())
+        claude_commander_protocol::ws::ws_attach_url(self.base.as_str())
     }
 
     /// The raw bearer token, if configured. Crate-internal and only handed to
@@ -209,10 +237,20 @@ impl RemoteClient {
             Some(token) => request.bearer_auth(token.expose()),
             None => request,
         };
-        request.send().await.map_err(|err| {
+        let request = request.build().map_err(error::transport_error)?;
+        let mutation = request.method() != reqwest::Method::GET;
+        if mutation {
+            self.invalidate_snapshots();
+        }
+        let response = self.client.execute(request).await.map_err(|err| {
             tracing::debug!(server = %self.name, error = %err, "remote request failed in transport");
             error::transport_error(err)
-        })
+        });
+        // A poll started during a mutation may have read the old state.
+        if mutation {
+            self.invalidate_snapshots();
+        }
+        response
     }
 
     /// Turn a non-success status into the matching [`ClientError`], reading the
@@ -394,13 +432,48 @@ impl RemoteClient {
     /// whether observable state moved. Any HTTP/transport failure propagates so
     /// the poller can go degraded.
     pub async fn poll_hashes(&self) -> ClientResult<u64> {
-        let workspace = self.get_bytes(self.endpoint(&["workspace"])).await?;
-        let agent_states = self.get_bytes(self.endpoint(&["agent-states"])).await?;
+        let epoch = self
+            .snapshots
+            .lock()
+            .expect("snapshot cache poisoned")
+            .epoch;
+        let (workspace, agent_states) = tokio::try_join!(
+            self.get_bytes(self.endpoint(&["workspace"])),
+            self.get_bytes(self.endpoint(&["agent-states"])),
+        )?;
+        let snapshot =
+            serde_json::from_slice(&workspace).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let agents = serde_json::from_slice(&agent_states)
+            .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let mut hasher = Xxh3::new();
         hasher.update(&workspace);
         hasher.update(b"\x00");
         hasher.update(&agent_states);
+        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+        if cache.epoch == epoch {
+            cache.fetched_at = Some(std::time::Instant::now());
+            cache.workspace = Some(snapshot);
+            cache.agents = Some(agents);
+        }
         Ok(hasher.digest())
+    }
+
+    fn invalidate_snapshots(&self) {
+        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+        cache.epoch = cache.epoch.wrapping_add(1);
+        cache.workspace = None;
+        cache.agents = None;
+    }
+
+    /// Wait for a server generation. A 404 means an older server: the poller
+    /// continues using its configured fallback cadence.
+    pub async fn wait_for_change(&self, since: Option<u64>) -> ClientResult<u64> {
+        let mut url = self.endpoint(&["changes"]);
+        if let Some(since) = since {
+            url.query_pairs_mut()
+                .append_pair("since", &since.to_string());
+        }
+        self.get_json(url).await
     }
 
     // -- Per-route methods --
@@ -441,11 +514,31 @@ impl RemoteClient {
         self.post_empty_ok(self.endpoint(&["pr-refresh"])).await
     }
 
-    pub async fn workspace_snapshot(&self) -> ClientResult<WorkspaceSnapshot> {
-        self.get_json(self.endpoint(&["workspace"])).await
+    pub async fn snapshot(&self) -> ClientResult<Snapshot> {
+        let cached = {
+            let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+            cache.expire();
+            cache.workspace.take()
+        };
+        match cached {
+            Some(snapshot) => Ok(snapshot),
+            None => self.get_json(self.endpoint(&["workspace"])).await,
+        }
     }
 
     pub async fn agent_states(&self, fresh: bool) -> ClientResult<AgentStatesSnapshot> {
+        if !fresh {
+            let cached = {
+                let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
+                cache.expire();
+                cache.agents.take()
+            };
+            if let Some(states) = cached {
+                return Ok(states);
+            }
+        } else {
+            self.invalidate_snapshots();
+        }
         let mut url = self.endpoint(&["agent-states"]);
         url.query_pairs_mut()
             .append_pair("fresh", if fresh { "true" } else { "false" });
@@ -463,6 +556,26 @@ impl RemoteClient {
                 .append_pair("lines", &lines.to_string());
         }
         self.get_json_opt(url).await
+    }
+
+    pub async fn preview_part(
+        &self,
+        id: Option<SessionId>,
+        project: Option<ProjectId>,
+        lines: Option<usize>,
+        part: claude_commander_protocol::preview::PreviewPart,
+    ) -> ClientResult<PreviewData> {
+        let mut url = match (id, project) {
+            (Some(id), _) => self.session_url(id, &["preview"]),
+            (_, Some(id)) => self.project_url(id, &["preview"]),
+            _ => return Err(ClientError::InvalidRequest("preview needs a target".into())),
+        };
+        url.query_pairs_mut().append_pair("part", part.as_str());
+        if let Some(lines) = lines {
+            url.query_pairs_mut()
+                .append_pair("lines", &lines.to_string());
+        }
+        self.get_json(url).await
     }
 
     /// Preview payload for a session (`GET /api/sessions/{id}/preview?lines=`).
@@ -518,8 +631,7 @@ impl RemoteClient {
     // -- Session mutations --
 
     pub async fn create_session(&self, opts: CreateSessionOpts) -> ClientResult<SessionId> {
-        let env: IdEnvelope<SessionId> =
-            self.post_json(self.endpoint(&["sessions"]), &opts).await?;
+        let env: CreatedId<SessionId> = self.post_json(self.endpoint(&["sessions"]), &opts).await?;
         Ok(env.id)
     }
 
@@ -544,12 +656,12 @@ impl RemoteClient {
     }
 
     pub async fn rename_session(&self, id: SessionId, title: String) -> ClientResult<()> {
-        let body = serde_json::json!({ "op": "rename", "title": title });
+        let body = PatchSession::Rename(RenameSession { title });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
     pub async fn set_section(&self, id: SessionId, section: Option<String>) -> ClientResult<()> {
-        let body = serde_json::json!({ "op": "set_section", "section": section });
+        let body = PatchSession::SetSection(SetSection { section });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
@@ -571,7 +683,7 @@ impl RemoteClient {
 
     /// Change a session's launch program (PATCH `change_program` op).
     pub async fn change_program(&self, id: SessionId, program: String) -> ClientResult<()> {
-        let body = serde_json::json!({ "op": "change_program", "program": program });
+        let body = PatchSession::ChangeProgram(ChangeProgram { program });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
     }
 
@@ -612,18 +724,25 @@ impl RemoteClient {
         // Batch counterpart to `mark_read`: `POST /api/sessions/unread` with
         // `{ "ids": [...] }`. Unknown ids are silently skipped server-side,
         // matching the local backend.
-        let ids: Vec<String> = ids.iter().map(|id| id.as_uuid().to_string()).collect();
-        let body = serde_json::json!({ "ids": ids });
+        let body = MarkUnread {
+            ids: ids.iter().map(|id| id.as_uuid().to_string()).collect(),
+        };
         self.post_json_ok(self.endpoint(&["sessions", "unread"]), &body)
             .await
     }
 
     // -- Projects --
 
-    pub async fn add_project(&self, path: PathBuf) -> ClientResult<ProjectId> {
-        let body = serde_json::json!({ "path": path });
-        let env: IdEnvelope<ProjectId> =
-            self.post_json(self.endpoint(&["projects"]), &body).await?;
+    /// `POST /projects` — register `path`, tagged with `workspace` (`None` =
+    /// Main). An absent workspace is omitted from the body, so an older server
+    /// sees exactly the request it always did.
+    pub async fn add_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ProjectId> {
+        let body = AddProjectRequest { path, workspace };
+        let env: CreatedId<ProjectId> = self.post_json(self.endpoint(&["projects"]), &body).await?;
         Ok(env.id)
     }
 
@@ -636,9 +755,15 @@ impl RemoteClient {
     /// second `add_project` would leave two entries for one repository. The
     /// dedupe rule (and the path resolution behind it) is the server's, so no
     /// client re-states it.
-    pub async fn ensure_project(&self, path: PathBuf) -> ClientResult<ProjectId> {
-        let body = serde_json::json!({ "path": path });
-        let env: IdEnvelope<ProjectId> = self
+    ///
+    /// `workspace` tags the project only if the server registers it here.
+    pub async fn ensure_project(
+        &self,
+        path: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ProjectId> {
+        let body = AddProjectRequest { path, workspace };
+        let env: CreatedId<ProjectId> = self
             .post_json(self.endpoint(&["projects", "ensure"]), &body)
             .await?;
         Ok(env.id)
@@ -648,9 +773,61 @@ impl RemoteClient {
         self.delete_ok(self.project_url(id, &[])).await
     }
 
-    pub async fn scan_directory(&self, dir: PathBuf) -> ClientResult<ScanResponse> {
+    // -- Workspaces --
+
+    /// `PUT /config/workspaces` — replace the server's workspace definitions.
+    pub async fn set_workspaces(&self, req: SetWorkspacesRequest) -> ClientResult<()> {
+        self.put_json_ok(self.endpoint(&["config", "workspaces"]), &req)
+            .await
+    }
+
+    /// `POST /config/workspaces/rename` — rename a workspace server-side,
+    /// rewriting its projects' tags. A no-op success where it is unknown.
+    pub async fn rename_workspace(&self, from: String, to: String) -> ClientResult<()> {
+        self.post_json_ok(
+            self.endpoint(&["config", "workspaces", "rename"]),
+            &RenameWorkspaceRequest { from, to },
+        )
+        .await
+    }
+
+    /// `POST /config/workspaces/delete` — delete a workspace server-side,
+    /// moving its projects to Main. A no-op success where it is unknown.
+    pub async fn delete_workspace(&self, name: String) -> ClientResult<()> {
+        self.post_json_ok(
+            self.endpoint(&["config", "workspaces", "delete"]),
+            &DeleteWorkspaceRequest { name },
+        )
+        .await
+    }
+
+    /// `PUT /projects/{id}/workspace` — move a project (`None` = Main).
+    pub async fn set_project_workspace(
+        &self,
+        id: ProjectId,
+        workspace: Option<String>,
+    ) -> ClientResult<()> {
+        self.put_json_ok(
+            self.project_url(id, &["workspace"]),
+            &SetProjectWorkspace { workspace },
+        )
+        .await
+    }
+
+    /// `POST /projects/scan` — register every repo under `dir`, each new one
+    /// tagged with `workspace` (`None` = Main; omitted from the body, so an
+    /// older server sees the body it always did).
+    pub async fn scan_directory(
+        &self,
+        dir: PathBuf,
+        workspace: Option<String>,
+    ) -> ClientResult<ScanResponse> {
         let url = self.endpoint(&["projects", "scan"]);
-        self.post_json(url, &ScanRequest { path: dir }).await
+        let body = AddProjectRequest {
+            path: dir,
+            workspace,
+        };
+        self.post_json(url, &body).await
     }
 
     // -- Hosted repositories / repository clone --
@@ -784,7 +961,7 @@ impl RemoteClient {
     }
 
     pub async fn create_comment(&self, id: SessionId, draft: NewComment) -> ClientResult<Uuid> {
-        let env: IdEnvelope<Uuid> = self
+        let env: CreatedId<Uuid> = self
             .post_json_within(
                 self.session_url(id, &["comments"]),
                 &draft,
@@ -817,7 +994,7 @@ impl RemoteClient {
         display_path: String,
     ) -> ClientResult<bool> {
         let body = ToggleReviewed { display_path };
-        let out: ReviewedBody = self
+        let out: ReviewedToggle = self
             .post_json_within(
                 self.session_url(id, &["files", "reviewed"]),
                 &body,
@@ -868,33 +1045,6 @@ async fn decode_json<T: DeserializeOwned>(response: Response) -> ClientResult<T>
     response.json::<T>().await.map_err(error::body_error)
 }
 
-/// The server wraps created-resource ids as `{ "id": … }`.
-#[derive(serde::Deserialize)]
-struct IdEnvelope<T> {
-    id: T,
-}
-
-/// `POST /sessions/{id}/files/reviewed` → `{ "reviewed": bool }`.
-#[derive(serde::Deserialize)]
-struct ReviewedBody {
-    reviewed: bool,
-}
-
-/// `POST /projects/scan` → `{ added, skipped }`. Mirrors the fields of core's
-/// `ScanResult` (which isn't `Deserialize`); the remote adapter rebuilds the
-/// core type from this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-pub struct ScanResponse {
-    pub added: usize,
-    pub skipped: usize,
-}
-
-/// Request body for `POST /projects/scan`: the directory to scan.
-#[derive(serde::Serialize)]
-struct ScanRequest {
-    path: PathBuf,
-}
-
 fn diff_side_param(side: DiffSide) -> &'static str {
     match side {
         DiffSide::Old => "old",
@@ -904,6 +1054,38 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn delayed_explicit_refresh_does_not_consume_an_old_poll() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        server.client.poll_hashes().await.unwrap();
+        server.client.snapshots.lock().unwrap().fetched_at =
+            Some(std::time::Instant::now() - Duration::from_secs(3));
+        server.client.snapshot().await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn polled_payloads_are_reused_once_and_invalidated_by_mutations() {
+        use std::sync::atomic::Ordering;
+        let server = crate::test_server::Server::start(true).await;
+        server.client.poll_hashes().await.unwrap();
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 1);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 1);
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
+        server.client.poll_hashes().await.unwrap();
+        server.client.request_pr_refresh().await.unwrap();
+        server.client.snapshot().await.unwrap();
+        server.client.agent_states(false).await.unwrap();
+        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 4);
+        assert_eq!(server.data.agents.load(Ordering::SeqCst), 4);
+    }
+
     use super::*;
 
     async fn test_client_with_responses(

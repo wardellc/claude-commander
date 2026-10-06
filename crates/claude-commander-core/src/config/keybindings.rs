@@ -60,9 +60,11 @@ pub enum BindableAction {
     OpenCommander,
     ToggleConversationOverlay,
     ToggleVoiceInput,
+    ToggleDictation,
     OpenReviewDiff,
     ShowHelp,
     ShowSettings,
+    CopyServerToken,
     Quit,
     ScrollUp,
     ScrollDown,
@@ -73,6 +75,11 @@ pub enum BindableAction {
     MoveToSection,
     ToggleViewMode,
     ToggleSection,
+    NextWorkspace,
+    PreviousWorkspace,
+    WorkspacePicker,
+    NewWorkspace,
+    MoveProjectToWorkspace,
     TogglePane,
     TogglePaneReverse,
     ShrinkLeftPane,
@@ -135,6 +142,12 @@ impl BindableAction {
         Self::MoveToSection,
         Self::ToggleViewMode,
         Self::ToggleSection,
+        // Workspaces
+        Self::NextWorkspace,
+        Self::PreviousWorkspace,
+        Self::WorkspacePicker,
+        Self::NewWorkspace,
+        Self::MoveProjectToWorkspace,
         // Right pane (list views)
         Self::TogglePane,
         Self::TogglePaneReverse,
@@ -146,6 +159,7 @@ impl BindableAction {
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
         Self::ToggleVoiceInput,
+        Self::ToggleDictation,
         // Scrolling
         Self::ScrollUp,
         Self::ScrollDown,
@@ -154,6 +168,7 @@ impl BindableAction {
         // Application
         Self::ShowHelp,
         Self::ShowSettings,
+        Self::CopyServerToken,
         Self::Quit,
     ];
 
@@ -197,9 +212,11 @@ impl BindableAction {
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
             Self::ToggleVoiceInput => "toggle_voice_input",
+            Self::ToggleDictation => "toggle_dictation",
             Self::OpenReviewDiff => "open_review_diff",
             Self::ShowHelp => "show_help",
             Self::ShowSettings => "show_settings",
+            Self::CopyServerToken => "copy_server_token",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll_up",
             Self::ScrollDown => "scroll_down",
@@ -210,6 +227,11 @@ impl BindableAction {
             Self::MoveToSection => "move_to_section",
             Self::ToggleViewMode => "toggle_view_mode",
             Self::ToggleSection => "toggle_section",
+            Self::NextWorkspace => "next_workspace",
+            Self::PreviousWorkspace => "previous_workspace",
+            Self::WorkspacePicker => "workspace_picker",
+            Self::NewWorkspace => "new_workspace",
+            Self::MoveProjectToWorkspace => "move_project_to_workspace",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
             Self::ShrinkLeftPane => "shrink_left_pane",
@@ -260,9 +282,11 @@ impl BindableAction {
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
             Self::ToggleVoiceInput => "Voice input: record / send (STT)",
+            Self::ToggleDictation => "Dictate: record / type transcript into pane or field (STT)",
             Self::OpenReviewDiff => "Review diff & comment",
             Self::ShowHelp => "Show help",
             Self::ShowSettings => "Settings",
+            Self::CopyServerToken => "Copy server token (pair a client)",
             Self::Quit => "Quit",
             Self::ScrollUp => "Scroll up",
             Self::ScrollDown => "Scroll down",
@@ -273,6 +297,11 @@ impl BindableAction {
             Self::MoveToSection => "Move session to section…",
             Self::ToggleViewMode => "Cycle view: project / sections / stacks / board",
             Self::ToggleSection => "Collapse/expand section",
+            Self::NextWorkspace => "Next workspace",
+            Self::PreviousWorkspace => "Previous workspace",
+            Self::WorkspacePicker => "Switch workspace…",
+            Self::NewWorkspace => "New workspace…",
+            Self::MoveProjectToWorkspace => "Move project to workspace…",
             Self::TogglePane => "Cycle right pane: preview / info / shell",
             Self::TogglePaneReverse => "Cycle right pane (reverse)",
             Self::ShrinkLeftPane => "Narrow the session list",
@@ -329,9 +358,11 @@ impl BindableAction {
             Self::OpenCommander => "commander",
             Self::ToggleConversationOverlay => "conversation",
             Self::ToggleVoiceInput => "voice",
+            Self::ToggleDictation => "dictate",
             Self::OpenReviewDiff => "review",
             Self::ShowHelp => "help",
             Self::ShowSettings => "settings",
+            Self::CopyServerToken => "copy token",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll up",
             Self::ScrollDown => "scroll down",
@@ -342,6 +373,11 @@ impl BindableAction {
             Self::MoveToSection => "move",
             Self::ToggleViewMode => "view",
             Self::ToggleSection => "collapse",
+            Self::NextWorkspace => "next workspace",
+            Self::PreviousWorkspace => "previous workspace",
+            Self::WorkspacePicker => "Workspaces",
+            Self::NewWorkspace => "new workspace",
+            Self::MoveProjectToWorkspace => "move project",
             Self::TogglePane => "pane",
             Self::TogglePaneReverse => "pane back",
             Self::ShrinkLeftPane => "narrower",
@@ -397,6 +433,11 @@ impl BindableAction {
                 "Remote Servers"
             }
             Self::MoveToSection | Self::ToggleViewMode | Self::ToggleSection => "Sections",
+            Self::NextWorkspace
+            | Self::PreviousWorkspace
+            | Self::WorkspacePicker
+            | Self::NewWorkspace
+            | Self::MoveProjectToWorkspace => "Workspaces",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -405,9 +446,12 @@ impl BindableAction {
             | Self::GenerateSummary
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
-            | Self::ToggleVoiceInput => "Review & AI",
+            | Self::ToggleVoiceInput
+            | Self::ToggleDictation => "Review & AI",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
-            Self::ShowHelp | Self::ShowSettings | Self::Quit => "Application",
+            Self::ShowHelp | Self::ShowSettings | Self::CopyServerToken | Self::Quit => {
+                "Application"
+            }
         }
     }
 }
@@ -454,9 +498,11 @@ impl FromStr for BindableAction {
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
             "toggle_voice_input" => Ok(Self::ToggleVoiceInput),
+            "toggle_dictation" => Ok(Self::ToggleDictation),
             "open_review_diff" => Ok(Self::OpenReviewDiff),
             "show_help" => Ok(Self::ShowHelp),
             "show_settings" => Ok(Self::ShowSettings),
+            "copy_server_token" => Ok(Self::CopyServerToken),
             "quit" => Ok(Self::Quit),
             "scroll_up" => Ok(Self::ScrollUp),
             "scroll_down" => Ok(Self::ScrollDown),
@@ -467,6 +513,11 @@ impl FromStr for BindableAction {
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
             "toggle_section" => Ok(Self::ToggleSection),
+            "next_workspace" => Ok(Self::NextWorkspace),
+            "previous_workspace" => Ok(Self::PreviousWorkspace),
+            "workspace_picker" => Ok(Self::WorkspacePicker),
+            "new_workspace" => Ok(Self::NewWorkspace),
+            "move_project_to_workspace" => Ok(Self::MoveProjectToWorkspace),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
@@ -836,6 +887,15 @@ impl Default for KeyBindings {
             BindableAction::ToggleVoiceInput,
             vec![kb(KeyCode::Char('v'), alt)],
         );
+        // Alt-t is intercepted on a *shell* pane too, unlike Alt-v — dictation
+        // types into whatever pane is attached, so it has to be reachable from
+        // both. That costs two things the user may want back, and both are
+        // rebindable here: readline's `transpose-words` (Alt-t in a shell) and
+        // Claude Code's own Alt+T thinking toggle.
+        bindings.insert(
+            BindableAction::ToggleDictation,
+            vec![kb(KeyCode::Char('t'), alt)],
+        );
         bindings.insert(
             BindableAction::OpenReviewDiff,
             vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), alt)],
@@ -849,6 +909,22 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('v'), none)],
         );
         bindings.insert(BindableAction::ToggleSection, vec![]);
+
+        // Workspaces. `w` cycles (wrapping), `W` opens the picker; the rest are
+        // palette-only. Deliberately not Ctrl-w (a terminal's delete-word),
+        // Ctrl-Tab (rarely delivered by terminals) or Alt-1..9 (tab switching
+        // in most terminal emulators).
+        bindings.insert(
+            BindableAction::NextWorkspace,
+            vec![kb(KeyCode::Char('w'), none)],
+        );
+        bindings.insert(
+            BindableAction::WorkspacePicker,
+            vec![kb(KeyCode::Char('W'), shift)],
+        );
+        bindings.insert(BindableAction::PreviousWorkspace, vec![]);
+        bindings.insert(BindableAction::NewWorkspace, vec![]);
+        bindings.insert(BindableAction::MoveProjectToWorkspace, vec![]);
 
         // Right pane (list views only)
         bindings.insert(BindableAction::TogglePane, vec![kb(KeyCode::Tab, none)]);
@@ -1073,6 +1149,17 @@ pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
 /// attach — the attach loop swallows them and toggles the mic in place.
 pub fn voice_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::ToggleVoiceInput)
+}
+
+/// Raw stdin byte patterns that toggle dictation mid-attach (from the
+/// [`ToggleDictation`](BindableAction::ToggleDictation) binding — `Alt-t` by
+/// default, encoded as the `ESC t` metaSendsEscape sequence). See
+/// [`trigger_bytes_for`]. Like the voice trigger these don't exit the attach —
+/// the attach loop swallows them and arms the mic in place — but unlike it they
+/// are intercepted on a shell pane as well as an agent one, because dictation
+/// types into whichever pane is on screen.
+pub fn dictation_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    trigger_bytes_for(bindings, BindableAction::ToggleDictation)
 }
 
 /// Whether a binding survives the [`trigger_bytes_for`] filter: a Ctrl- or
@@ -1375,6 +1462,25 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_dictation_default_bound_to_alt_t() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleDictation));
+    }
+
+    #[test]
+    fn test_toggle_dictation_config_name_roundtrips() {
+        assert_eq!(
+            "toggle_dictation".parse::<BindableAction>().unwrap(),
+            BindableAction::ToggleDictation
+        );
+        assert_eq!(
+            BindableAction::ToggleDictation.config_name(),
+            "toggle_dictation"
+        );
+    }
+
+    #[test]
     fn test_open_commander_round_trips_through_from_str() {
         let name = BindableAction::OpenCommander.config_name();
         assert_eq!(
@@ -1446,6 +1552,26 @@ mod tests {
             assert_eq!(name.parse::<BindableAction>().unwrap(), action);
             assert_eq!(action.config_name(), name);
         }
+    }
+
+    #[test]
+    fn test_copy_server_token_palette_only() {
+        // Palette-only: pairing a client is a once-per-device action, and the
+        // palette is this project's canonical command surface. It still has to
+        // round-trip through TOML so a user who binds it doesn't hit "unknown
+        // action".
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::CopyServerToken).is_empty());
+        assert_eq!(
+            "copy_server_token".parse::<BindableAction>().unwrap(),
+            BindableAction::CopyServerToken
+        );
+        assert_eq!(
+            BindableAction::CopyServerToken.config_name(),
+            "copy_server_token"
+        );
+        assert_eq!(BindableAction::CopyServerToken.section(), "Application");
+        assert!(BindableAction::ALL.contains(&BindableAction::CopyServerToken));
     }
 
     #[test]
@@ -1542,7 +1668,7 @@ mod tests {
     fn test_toml_deserialization_override() {
         let toml = r#"
             quit = ["Esc"]
-            navigate_up = "w"
+            navigate_up = "y"
         "#;
 
         let kb: KeyBindings = toml::from_str(toml).unwrap();
@@ -1555,8 +1681,8 @@ mod tests {
         let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         assert_ne!(kb.resolve(&q), Some(BindableAction::Quit));
 
-        // Overridden: navigate_up is now 'w' (single string, not array)
-        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        // Overridden: navigate_up is now 'y' (single string, not array)
+        let w = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
 
         // Non-overridden defaults still work
@@ -1587,11 +1713,11 @@ mod tests {
         // silently ignored so old configs don't break.
         let toml = r#"
             nonexistent_action = ["k"]
-            navigate_up = "w"
+            navigate_up = "y"
         "#;
         let kb: KeyBindings = toml::from_str(toml).unwrap();
         // Recognised override still applied
-        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        let w = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
     }
 
@@ -1623,6 +1749,7 @@ mod tests {
                 "Pull Requests",
                 "Remote Servers",
                 "Sections",
+                "Workspaces",
                 "Right Pane",
                 "Review & AI",
                 "Scrolling",
@@ -1704,6 +1831,15 @@ mod tests {
         // metaSendsEscape sequence `ESC v` so it can toggle the mic in place.
         let kb = KeyBindings::default();
         assert_eq!(voice_trigger_bytes(&kb), vec![vec![0x1b, b'v']]);
+    }
+
+    #[test]
+    fn test_dictation_trigger_bytes_default_is_alt_t() {
+        // Default ToggleDictation is Alt-t, interceptable mid-attach as the
+        // metaSendsEscape sequence `ESC t` so it can arm the mic in place — on a
+        // shell pane as well as an agent one, unlike Alt-v.
+        let kb = KeyBindings::default();
+        assert_eq!(dictation_trigger_bytes(&kb), vec![vec![0x1b, b't']]);
     }
 
     #[test]
@@ -1826,5 +1962,47 @@ mod tests {
         // costs no key and can't be triggered by a slip.
         let kb = KeyBindings::default();
         assert!(kb.keys_for(BindableAction::SetSessionBase).is_empty());
+    }
+
+    #[test]
+    fn test_workspace_keys_default_to_w_and_shift_w() {
+        let kb = KeyBindings::default();
+        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&w), Some(BindableAction::NextWorkspace));
+        let shift_w = KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_w), Some(BindableAction::WorkspacePicker));
+    }
+
+    #[test]
+    fn test_palette_only_workspace_actions_are_unbound_but_listed() {
+        let kb = KeyBindings::default();
+        for action in [
+            BindableAction::PreviousWorkspace,
+            BindableAction::NewWorkspace,
+            BindableAction::MoveProjectToWorkspace,
+        ] {
+            assert!(kb.keys_for(action).is_empty(), "{action:?} must be unbound");
+            assert!(BindableAction::ALL.contains(&action));
+            assert_eq!(action.section(), "Workspaces");
+        }
+        assert_eq!(BindableAction::NextWorkspace.section(), "Workspaces");
+        assert_eq!(BindableAction::WorkspacePicker.section(), "Workspaces");
+    }
+
+    #[test]
+    fn test_workspace_config_names_roundtrip() {
+        for (action, name) in [
+            (BindableAction::NextWorkspace, "next_workspace"),
+            (BindableAction::PreviousWorkspace, "previous_workspace"),
+            (BindableAction::WorkspacePicker, "workspace_picker"),
+            (BindableAction::NewWorkspace, "new_workspace"),
+            (
+                BindableAction::MoveProjectToWorkspace,
+                "move_project_to_workspace",
+            ),
+        ] {
+            assert_eq!(action.config_name(), name);
+            assert_eq!(name.parse::<BindableAction>().unwrap(), action);
+        }
     }
 }

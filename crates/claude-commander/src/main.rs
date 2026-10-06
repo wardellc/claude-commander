@@ -18,6 +18,7 @@ use claude_commander_tui::App;
 use crate::cli_args::{Cli, Commands, cli_reference};
 
 mod cli_args;
+mod serve;
 
 /// This binary's name and version. Everything user-facing (`--version`, the
 /// startup log line, the telemetry frontend) comes from this package's
@@ -93,8 +94,11 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     let filter = if debug {
         EnvFilter::new("debug")
     } else {
-        // Use info level for our crate, warn for dependencies
+        // Use info level for our crate, warn for dependencies. The embedded
+        // server shares this subscriber — installing its own would panic on the
+        // second global init — so its target is named explicitly here.
         EnvFilter::new("info")
+            .add_directive("claude_commander_server=info".parse()?)
             .add_directive("gix=warn".parse()?)
             .add_directive("tokio=warn".parse()?)
     };
@@ -266,6 +270,16 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, true)?;
             info!("Starting Claude Commander TUI v{}", VERSION);
 
+            // Settle the server plan (and persist any generated token) before
+            // the config store exists — see `serve::prepare`.
+            let mut config = config;
+            let plan = serve::prepare(
+                &mut config,
+                &Config::config_file_path()?,
+                cli.serve,
+                cli.no_serve,
+            );
+
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
@@ -276,23 +290,75 @@ async fn main() -> Result<()> {
                 remote_backend_factory(),
                 cli_reference(),
             );
+
+            // Held for the rest of `main`: dropping the guard stops the server,
+            // so the listener goes away exactly when the TUI does.
+            //
+            // This binds before `app.run()`, which means a client can be served
+            // during the TUI's startup reconciliation (dropping stale `Creating`
+            // sessions, syncing status against live tmux) and briefly see
+            // pre-reconcile state. Accepted deliberately: the window is a few
+            // milliseconds, it self-corrects on the client's next poll, and
+            // closing it would mean either delaying the listener behind the TUI's
+            // startup or plumbing the server into `App::run` — which would make
+            // the terminal frontend depend on axum.
+            let _server = match plan {
+                Some(plan) => {
+                    let (guard, status) = serve::start(app.service_handle(), plan).await;
+                    app.set_embedded_server(status);
+                    guard
+                }
+                None => None,
+            };
+
             app.run().await?;
         }
 
-        Some(Commands::List { all, json }) => {
+        Some(Commands::List {
+            all,
+            json,
+            workspace,
+        }) => {
             setup_logging(cli.debug, false)?;
 
             if json {
-                let service =
-                    claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+                let service = claude_commander_core::api::CommanderService::for_cli(
+                    config.clone(),
+                    frontend(),
+                )?;
+                let projects = service.list_projects().await;
+                let workspaces = claude_commander_core::cli::CliWorkspaces::resolve(
+                    &config,
+                    projects.iter().filter_map(|p| p.workspace.as_deref()),
+                    workspace.as_deref(),
+                )?;
+                let tag_of = |id| {
+                    projects
+                        .iter()
+                        .find(|p| p.id == id)
+                        .and_then(|p| p.workspace.clone())
+                };
                 let sessions = service.list_sessions(all).await?;
                 let entries: Vec<_> = sessions
                     .iter()
-                    .map(claude_commander_core::cli::SessionJsonEntry::from_info)
+                    .map(|s| (s, tag_of(s.project_id)))
+                    .filter(|(_, tag)| workspaces.includes(tag.as_deref()))
+                    .map(|(s, tag)| {
+                        claude_commander_core::cli::SessionJsonEntry::from_info(s)
+                            .with_workspace(tag)
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
                 let app_state = AppState::load_or_exit();
+                let workspaces = claude_commander_core::cli::CliWorkspaces::resolve(
+                    &config,
+                    app_state
+                        .projects
+                        .values()
+                        .filter_map(|p| p.workspace.as_deref()),
+                    workspace.as_deref(),
+                )?;
 
                 println!("Sessions:");
                 println!();
@@ -302,8 +368,21 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
 
-                for project in app_state.projects.values() {
-                    println!("  {} ({})", project.name, project.main_branch);
+                for project in app_state
+                    .projects
+                    .values()
+                    .filter(|p| workspaces.includes(p.workspace.as_deref()))
+                {
+                    if workspaces.show_column() {
+                        println!(
+                            "  {} ({})  [{}]",
+                            project.name,
+                            project.main_branch,
+                            workspaces.label(project.workspace.as_deref())
+                        );
+                    } else {
+                        println!("  {} ({})", project.name, project.main_branch);
+                    }
 
                     let sessions: Vec<_> = project
                         .worktrees
@@ -491,6 +570,7 @@ async fn main() -> Result<()> {
             base_branch,
             section,
             remote,
+            workspace,
         }) => {
             setup_logging(cli.debug, false)?;
 
@@ -505,7 +585,7 @@ async fn main() -> Result<()> {
             // `--project` and `--path` are mutually exclusive (clap-enforced).
             let project_path = match (project, path, remote.as_deref()) {
                 (Some(name), _, _) => {
-                    let snapshot = backend.workspace_snapshot().await?;
+                    let snapshot = backend.snapshot().await?;
                     claude_commander_core::session::resolve_project_path(&snapshot.projects, &name)?
                 }
                 (None, Some(p), _) => p,
@@ -517,6 +597,36 @@ async fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             };
+
+            // `--workspace` (clap-bound to `--path`): register the project in that
+            // workspace first, so `create_session`'s own ensure finds it. An
+            // existing project keeps its workspace — say so rather than
+            // silently ignoring the flag.
+            if let Some(typed) = workspace.as_deref() {
+                let snapshot = backend.snapshot().await?;
+                let tag =
+                    claude_commander_core::cli::resolve_new_session_workspace(&snapshot, typed);
+                let id = match backend
+                    .ensure_project(project_path.clone(), tag.clone())
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(claude_commander_core::backend::BackendError::InvalidRequest(msg)) => {
+                        clap::Error::raw(clap::error::ErrorKind::InvalidValue, format!("{msg}\n"))
+                            .exit();
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if let Some(existing) = snapshot.projects.iter().find(|p| p.id == id)
+                    && existing.workspace != tag
+                {
+                    eprintln!(
+                        "Note: project '{}' is already registered in workspace '{}'; it was not moved.",
+                        existing.name,
+                        existing.workspace.as_deref().unwrap_or("main")
+                    );
+                }
+            }
 
             match &remote {
                 Some(server) => println!("Creating session '{name}' on remote '{server}'..."),

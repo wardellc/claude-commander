@@ -1,17 +1,68 @@
 //! State management: state updates, session sync, list refresh, selection persistence.
 
 use super::*;
-use claude_commander_core::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot};
+use claude_commander_core::api::{ProjectInfo, SessionInfo, Snapshot};
 use std::collections::BTreeMap;
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
-            StateUpdate::ConfigReloaded { result } => self.apply_config_reload(result),
+            StateUpdate::ActionFinished {
+                backend_id,
+                message,
+            } => {
+                match message {
+                    Ok(text) => {
+                        self.ui_state.status_message =
+                            Some((text, Instant::now() + Duration::from_secs(3)))
+                    }
+                    Err(message) => self.ui_state.modal = Modal::Error { message },
+                }
+                self.spawn_backend_view_refresh(BackendId(backend_id));
+            }
+            StateUpdate::ViewedAgentStatesUpdated {
+                backend_id,
+                revision,
+                states,
+            } => {
+                let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) else {
+                    return;
+                };
+                if revision < handle.agent_states_revision {
+                    return;
+                }
+                handle.agent_states_revision = revision;
+                apply_viewed_session_refresh(&mut handle.view.agent_states.states, states.clone());
+                if handle.id == LOCAL_BACKEND_ID {
+                    apply_viewed_session_refresh(&mut self.ui_state.agent_states, states);
+                }
+                self.refresh_list_items().await;
+            }
+            StateUpdate::ConfigReloaded { result } => {
+                if self.apply_config_reload(result) {
+                    self.refresh_list_items().await;
+                }
+            }
             StateUpdate::BackendChanged {
+                revision,
                 backend_id,
                 snapshot,
                 states,
             } => {
+                let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) else {
+                    return;
+                };
+                if revision < handle.view_revision {
+                    return;
+                }
+                let old_host = handle.view.snapshot.server.effective_code_host();
+                let host = snapshot.server.effective_code_host();
+                let host_changed =
+                    old_host.provider != host.provider || old_host.hostname != host.hostname;
+                handle.view_revision = revision;
+                let states_are_current = revision >= handle.agent_states_revision;
+                if states_are_current {
+                    handle.agent_states_revision = revision;
+                }
                 let states = *states;
                 let is_local = backend_id == claude_commander_core::backend::LOCAL_BACKEND_ID.0;
                 // Diff the OLD agent states (before we overwrite them) against
@@ -24,7 +75,9 @@ impl App {
                 // own per-backend `view.agent_states` captured here before the
                 // fold below overwrites them. Either way `spawn_review_refresh`
                 // routes to the session's owning backend.
-                let review_refresh = if is_local {
+                let review_refresh = if !states_are_current {
+                    None
+                } else if is_local {
                     self.review_refresh_on_transition(&self.ui_state.agent_states, &states.states)
                 } else {
                     self.backends
@@ -36,7 +89,9 @@ impl App {
 
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
                     handle.view.snapshot = *snapshot;
-                    handle.view.agent_states = states.clone();
+                    if states_are_current {
+                        handle.view.agent_states = states.clone();
+                    }
                     // The local backend's connection derives from the snapshot's
                     // tmux health; a remote backend's is owned by its
                     // connection-watch task, so a fold must not touch it.
@@ -51,9 +106,22 @@ impl App {
                 // commander chip, and the project-pull badges (folded out of the
                 // snapshot the poll loops maintain). Single-backend this phase;
                 // Phase E merges every backend's states into one tree.
-                if is_local {
+                if is_local && states_are_current {
                     self.ui_state.agent_states = states.states;
                     self.ui_state.commander_running = states.commander_running;
+                }
+                if host_changed {
+                    self.invalidate_code_host_caches(BackendId(backend_id), host);
+                    let handle = self
+                        .backends
+                        .iter_mut()
+                        .find(|h| h.id.0 == backend_id)
+                        .unwrap();
+                    let backend = handle.backend.clone();
+                    handle.feed_tasks.retain(|task| !task.is_finished());
+                    handle.feed_tasks.push(tokio::spawn(async move {
+                        let _ = backend.request_pr_refresh().await;
+                    }));
                 }
                 // Pull badges union every backend's snapshot (project ids are
                 // globally unique), so a remote's blocked pull must be re-folded
@@ -69,6 +137,21 @@ impl App {
                 // cross-frontend marker change would never propagate.
                 self.refresh_comment_indicators();
                 self.refresh_list_items().await;
+                if let Some((backend, project)) = self.ui_state.pending_project
+                    && backend.0 == backend_id
+                {
+                    self.select_project_in_sidebar(project);
+                    self.ui_state.pending_project = None;
+                }
+                if let Some(selection) = self.ui_state.pending_selection
+                    && selection.backend.0 == backend_id
+                    && self.select_session_in_tree(selection.id)
+                {
+                    self.ui_state.pending_selection = None;
+                    self.spawn_lfs_pull(selection.id).await;
+                    self.ui_state.preview_update_spawned_at = None;
+                    self.spawn_preview_update();
+                }
             }
             StateUpdate::BackendConnection { backend_id, state } => {
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
@@ -107,7 +190,8 @@ impl App {
                 // and a result for a selection that moved on *without* a
                 // respawn still has to release its own, or the next fetch is
                 // blocked until the 5s backstop.
-                if self.ui_state.preview_update_spawned_at == Some(spawned_at) {
+                let owns_fetch = self.ui_state.preview_update_spawned_at == Some(spawned_at);
+                if owns_fetch {
                     self.ui_state.preview_update_spawned_at = None;
                 }
                 // Only paint if the same thing is still selected — otherwise the
@@ -116,7 +200,7 @@ impl App {
                 // enough.
                 let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
                     && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
-                if still_selected {
+                if owns_fetch && still_selected {
                     self.ui_state.preview_content = preview_content;
                     self.ui_state.shell_content = shell_content;
                     self.ui_state.diff_info = diff_info;
@@ -176,28 +260,22 @@ impl App {
             } => {
                 debug!("Session created: {}", session_id);
                 let backend_id = BackendId(backend_id);
+                let Some(handle) = self.backends.iter().find(|h| h.id == backend_id) else {
+                    return;
+                };
+                let sequence = handle.refresh_sequence.clone();
                 self.ui_state.modal = Modal::None;
                 self.ui_state.status_message = Some((
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                // Reconcile the section on (and refresh the view of) the OWNING
-                // backend — not always the local one — so the new row is present
-                // in that backend's cached view before we try to select it.
-                // Selecting before the view carried the session was the bug that
-                // left a remote create half-landed (no reconcile, no selection).
-                self.reconcile_one_section_assignment(backend_id, session_id)
-                    .await;
-                // Materialise LFS content in the background (worktree was
-                // created with smudging skipped). Inserts into lfs_pull_in_flight
-                // before the refresh below so the marker shows on first paint.
-                // Self-guards to local sessions (remote worktrees are
-                // server-side; the id won't resolve in the local view).
-                self.spawn_lfs_pull(session_id).await;
-                self.refresh_list_items().await;
-                // Select the newly created session
-                self.select_session_in_tree(session_id);
-                self.spawn_preview_update();
+                self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let _ = backend.reconcile_one_section(session_id).await;
+                    super::fetch_and_send_backend_change(sequence, backend_id.0, backend, tx).await;
+                });
             }
             StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
@@ -298,8 +376,8 @@ impl App {
                     "Added project".to_string(),
                     Instant::now() + Duration::from_secs(4),
                 ));
-                self.refresh_backend_view(BackendId(backend_id)).await;
-                self.refresh_list_items().await;
+                self.ui_state.pending_project = Some((BackendId(backend_id), project_id));
+                self.spawn_backend_view_refresh(BackendId(backend_id));
             }
             StateUpdate::RepositoriesLoaded {
                 backend_id,
@@ -373,15 +451,12 @@ impl App {
                 backend_id,
                 session_id,
             } => {
-                self.refresh_backend_view(BackendId(backend_id)).await;
-                self.refresh_list_items().await;
-                // The session may have moved position (rename re-sorts, a section
-                // move relocates it); keep it selected and refresh the Info
-                // modal's diff if it is open.
-                if self.select_session_in_tree(session_id) {
-                    self.ui_state.preview_update_spawned_at = None;
-                    self.spawn_preview_update();
+                let backend_id = BackendId(backend_id);
+                if !self.backends.iter().any(|h| h.id == backend_id) {
+                    return;
                 }
+                self.ui_state.pending_selection = Some(SessionRef::new(backend_id, session_id));
+                self.spawn_backend_view_refresh(backend_id);
             }
             StateUpdate::NewSessionProgramsLoaded {
                 project_id,
@@ -735,22 +810,12 @@ impl App {
         self.refresh_local_view().await;
     }
 
-    /// Re-run section assignment for a single freshly created session on the
-    /// backend that owns it, then refresh that backend's cached view so the new
-    /// (possibly re-sectioned) row is present before the caller selects it.
-    pub(super) async fn reconcile_one_section_assignment(
-        &mut self,
-        backend_id: BackendId,
-        session_id: SessionId,
-    ) {
-        let _ = self
-            .backend_arc(backend_id)
-            .reconcile_one_section(session_id)
-            .await;
-        self.refresh_backend_view(backend_id).await;
-    }
-
     pub(super) async fn refresh_list_items(&mut self) {
+        // The active workspace (or whether there are workspaces at all) may
+        // have changed since the theme was built; the rest of this rebuild
+        // then reads the right palette.
+        self.sync_workspace_theme();
+
         // A section list mode needs configured sections; fall back to the
         // project list view if the user removed them (hot-reload). The board
         // uses baked-in defaults, so it is unaffected.
@@ -761,11 +826,15 @@ impl App {
         // Drop a board filter whose project no longer exists in any snapshot
         // (e.g. just deleted) so the columns don't filter to an absent project.
         // Board-only; harmless in list modes.
+        let filter = self.workspace_filter();
         if let Some(f) = self.ui_state.board_filter
-            && !self
-                .backends
-                .iter()
-                .any(|h| h.view.snapshot.projects.iter().any(|p| p.id == f))
+            && !self.backends.iter().any(|h| {
+                h.view
+                    .snapshot
+                    .projects
+                    .iter()
+                    .any(|p| p.id == f && filter.admits(p.workspace.as_deref()))
+            })
         {
             self.ui_state.board_filter = None;
         }
@@ -834,10 +903,18 @@ impl App {
     /// re-anchor the board cursor to the tracked selection.
     fn rebuild_board_view(&mut self) {
         let sections = self.config.effective_sections();
+        // The board and its project sidebar show the active workspace only.
+        let filter = self.workspace_filter();
+        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+            .backends
+            .iter()
+            .map(|h| filter.scope(&h.view.snapshot))
+            .collect();
         let inputs: Vec<claude_commander_core::session::BoardBackendInput> = self
             .backends
             .iter()
-            .map(|h| {
+            .zip(&scoped)
+            .map(|(h, snapshot)| {
                 let version_warning = if h.id == claude_commander_core::backend::LOCAL_BACKEND_ID {
                     None
                 } else {
@@ -851,7 +928,7 @@ impl App {
                     name: h.backend.descriptor().name,
                     connection: h.view.connection.clone(),
                     version_warning,
-                    snapshot: &h.view.snapshot,
+                    snapshot,
                     agent_states: &h.view.agent_states.states,
                 }
             })
@@ -863,6 +940,8 @@ impl App {
             self.ui_state.board_filter,
             self.config.hide_empty_sections,
         );
+        drop(inputs);
+        drop(scoped);
 
         // Mark rows whose LFS content is still being pulled (UI-only state).
         if !self.ui_state.lfs_pull_in_flight.is_empty() {
@@ -918,6 +997,14 @@ impl App {
     fn rebuild_list_view(&mut self) {
         let single_backend = self.backends.len() == 1;
         let mut items: Vec<SessionListItem> = Vec::new();
+        // Every list block — Recent and each backend's tree — shows the
+        // active workspace only.
+        let filter = self.workspace_filter();
+        let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
+            .backends
+            .iter()
+            .map(|h| filter.scope(&h.view.snapshot))
+            .collect();
 
         // Recent-sessions block, prepended above the per-backend tree and
         // independent of any server. Each row is a shortcut to a session that
@@ -928,9 +1015,9 @@ impl App {
         let recent_limit = self.config.recent_sessions_limit as usize;
         if recent_limit > 0 {
             let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, SessionListItem)> = Vec::new();
-            for handle in &self.backends {
+            for (handle, snapshot) in self.backends.iter().zip(&scoped) {
                 let agent_states = &handle.view.agent_states.states;
-                for s in &handle.view.snapshot.sessions {
+                for s in &snapshot.sessions {
                     if let Some(at) = s.last_attached_at {
                         candidates.push((
                             at,
@@ -974,8 +1061,8 @@ impl App {
         // divider); the per-backend tree appended below is the scrolling list.
         let recents_len = items.len();
 
-        for handle in &self.backends {
-            let snapshot = &handle.view.snapshot;
+        for (handle, snapshot) in self.backends.iter().zip(&scoped) {
+            let snapshot: &Snapshot = snapshot;
             let agent_states = &handle.view.agent_states.states;
             if !single_backend {
                 let version_warning =
@@ -1020,6 +1107,7 @@ impl App {
             };
             items.append(&mut backend_items);
         }
+        drop(scoped);
 
         // Mark rows whose LFS content is still being pulled (UI-only state).
         if !self.ui_state.lfs_pull_in_flight.is_empty() {
@@ -1171,7 +1259,7 @@ pub(super) fn order_recent<T>(
 /// Index a snapshot's sessions by id for O(1) lookup during stack-chain
 /// building.
 fn session_index(
-    snapshot: &claude_commander_core::api::WorkspaceSnapshot,
+    snapshot: &claude_commander_core::api::Snapshot,
 ) -> std::collections::HashMap<
     claude_commander_core::session::SessionId,
     &claude_commander_core::api::SessionInfo,
@@ -1229,7 +1317,7 @@ pub(super) fn apply_viewed_session_refresh(
 /// the delete-confirm dialog derives its preview from the cached snapshot rather
 /// than reading the store, so a remote backend's snapshot drives it identically.
 pub(super) fn stack_retarget_preview_from_snapshot(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     session_id: SessionId,
 ) -> Option<(usize, String)> {
     let deleted = snapshot
@@ -1289,7 +1377,7 @@ pub(super) fn stack_retarget_preview_from_snapshot(
 /// session shows no marker rather than a possibly-wrong one; every row is still
 /// a legal target.
 pub(super) fn base_picker_rows_from_snapshot(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     session_id: SessionId,
 ) -> Vec<(Option<SessionId>, String, String)> {
     let Some(session) = snapshot
@@ -1357,8 +1445,19 @@ const CURRENT_SUFFIX: &str = " — current base";
 
 // ---- List-view item builders (revived from main; reuse board.rs helpers) ----
 
+/// Whether `hide_empty_sections` drops the section `name` holding `count`
+/// sessions. In Progress is exempt while some project has no sessions at all:
+/// it is the only section that lists such a project, so hiding it would make
+/// the project unreachable — the usual state of a freshly populated workspace.
+fn hides_empty_section(snapshot: &Snapshot, name: &str, count: usize, hide_empty: bool) -> bool {
+    hide_empty
+        && count == 0
+        && !(name == claude_commander_core::session::IN_PROGRESS
+            && snapshot.projects.iter().any(|p| p.session_ids.is_empty()))
+}
+
 pub(super) fn build_project_grouped_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     agent_states: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
     let by_id = session_index(snapshot);
@@ -1400,7 +1499,7 @@ pub(super) fn build_project_grouped_items(
 }
 
 pub(super) fn build_section_grouped_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1416,7 +1515,12 @@ pub(super) fn build_section_grouped_items(
     let mut items = Vec::new();
     let mut first_section = true;
     for group in groups.iter() {
-        if hide_empty_sections && group.sessions.is_empty() {
+        if hides_empty_section(
+            snapshot,
+            &group.name,
+            group.sessions.len(),
+            hide_empty_sections,
+        ) {
             continue;
         }
         if !first_section {
@@ -1489,7 +1593,7 @@ pub(super) fn build_section_grouped_items(
 }
 
 pub(super) fn build_stacked_section_items(
-    snapshot: &WorkspaceSnapshot,
+    snapshot: &Snapshot,
     sections: &[claude_commander_core::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
@@ -1644,7 +1748,7 @@ pub(super) fn build_stacked_section_items(
             })
             .unwrap_or(0);
 
-        if hide_empty_sections && total_count == 0 {
+        if hides_empty_section(snapshot, section_name, total_count, hide_empty_sections) {
             continue;
         }
         if !first_section {
@@ -1749,7 +1853,7 @@ mod unread_transition_tests {
 mod stack_order_tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use claude_commander_core::api::workspace_snapshot_from_state;
+    use claude_commander_core::api::snapshot_from_state;
     use claude_commander_core::session::{ProjectId, WorktreeSession};
     use std::path::PathBuf;
 
@@ -1790,11 +1894,11 @@ mod stack_order_tests {
         }
     }
 
-    /// Build the DTO [`WorkspaceSnapshot`] the tree builders now consume, from a
+    /// Build the DTO [`Snapshot`] the tree builders now consume, from a
     /// list of domain sessions — same shaped input as before, projected through
-    /// the production `workspace_snapshot_from_state` so tests exercise the real
+    /// the production `snapshot_from_state` so tests exercise the real
     /// conversion path.
-    fn appstate_from(sessions: Vec<WorktreeSession>) -> WorkspaceSnapshot {
+    fn appstate_from(sessions: Vec<WorktreeSession>) -> Snapshot {
         let mut state = claude_commander_core::config::AppState::default();
         // Group sessions by their project_id so projects with multiple
         // worktrees stay linked correctly.
@@ -1815,7 +1919,7 @@ mod stack_order_tests {
             state.projects.get_mut(&pid).unwrap().add_worktree(s.id);
             state.sessions.insert(s.id, s);
         }
-        workspace_snapshot_from_state(&state)
+        snapshot_from_state(&state)
     }
 
     /// The picker offers main plus every non-descendant sibling, and never the
@@ -2762,6 +2866,67 @@ mod stack_order_tests {
         assert_eq!(headers, vec!["Review"]);
     }
 
+    /// A project with no sessions is listed only under In Progress, so hiding
+    /// an In Progress that holds no sessions made it unreachable. That is the
+    /// normal case for a workspace whose projects are all new: every session
+    /// is elsewhere, the In Progress count is zero, and the project vanished.
+    #[test]
+    fn hide_empty_sections_keeps_in_progress_for_a_project_without_sessions() {
+        let mut state = claude_commander_core::config::AppState::default();
+        let project =
+            claude_commander_core::session::Project::new("empty", PathBuf::from("/tmp"), "main");
+        let project_id = project.id;
+        state.projects.insert(project_id, project);
+        let snapshot = snapshot_from_state(&state);
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        for (view, items) in [
+            (
+                "grouped",
+                super::build_section_grouped_items(
+                    &snapshot,
+                    &sections,
+                    None,
+                    &BTreeMap::new(),
+                    &std::collections::HashSet::new(),
+                    true,
+                ),
+            ),
+            (
+                "stacked",
+                build_stacked_section_items(
+                    &snapshot,
+                    &sections,
+                    None,
+                    &BTreeMap::new(),
+                    &std::collections::HashSet::new(),
+                    true,
+                ),
+            ),
+        ] {
+            let headers: Vec<_> = items
+                .iter()
+                .filter_map(|i| match i {
+                    SessionListItem::SectionHeader { name, count, .. } => {
+                        Some((name.as_str(), *count))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                headers,
+                vec![(claude_commander_core::session::IN_PROGRESS, 0)],
+                "{view}: only In Progress, with no sessions counted",
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|i| matches!(i, SessionListItem::Project { id, .. } if *id == project_id)),
+                "{view}: the session-less project must still be listed",
+            );
+        }
+    }
+
     #[test]
     fn hide_empty_sections_no_spacers_when_all_hidden() {
         // When all sections are empty and hide_empty_sections is true,
@@ -2901,7 +3066,7 @@ mod stack_order_tests {
         // Project into the DTO snapshot the builders now consume, once, outside
         // the timed loop — we measure the builders, not snapshot construction
         // (the cached snapshot is built on change, not per refresh).
-        let snapshot = workspace_snapshot_from_state(&state);
+        let snapshot = snapshot_from_state(&state);
 
         // Warm up so the first-touch allocation cost doesn't dominate the timing.
         for _ in 0..50 {

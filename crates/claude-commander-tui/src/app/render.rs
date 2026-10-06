@@ -1,6 +1,7 @@
 //! Rendering: top bar, full-screen kanban board, status bar.
 
 use super::*;
+use crate::EmbeddedServerStatus;
 use crate::hotkey::ActionButton;
 
 /// Split a list view's content area into (session list, right pane).
@@ -52,6 +53,32 @@ pub(super) fn commander_chip_label(
     Some(format!("\u{25cf} Commander{suffix}"))
 }
 
+/// Build the footer chip for the in-process HTTP server, or `None` when this run
+/// was never asked to serve (the chip is hidden then).
+///
+/// Two shapes, because the two outcomes need different reactions: `⇅ 7878` says
+/// clients can reach this machine, while `⇅ server unavailable` says they cannot.
+/// The bind failure is worth a chip rather than only a startup toast — a toast is
+/// invisible from inside an attached pane, and the operator may not look at the
+/// terminal until long after launch.
+///
+/// The label is deliberately short in both cases. The status bar's left zone is
+/// laid out as `Length(left_width)`, so it takes its width out of the action
+/// buttons' `Fill(1)`: putting the bind error (`could not bind 127.0.0.1:7878:
+/// Address already in use`) in here would evict every button on an 80-column
+/// terminal. The reason goes to the log and to a startup toast instead.
+pub(super) fn server_chip_label(status: Option<&EmbeddedServerStatus>) -> Option<String> {
+    match status? {
+        EmbeddedServerStatus::Listening { url, .. } => {
+            // The port is the part that varies and the part a client needs; the
+            // scheme and host would just cost columns the buttons want.
+            let port = url.rsplit(':').next().unwrap_or(url);
+            Some(format!("\u{21c5} {port}"))
+        }
+        EmbeddedServerStatus::Failed { .. } => Some("\u{21c5} server unavailable".to_string()),
+    }
+}
+
 impl App {
     /// Return the border type based on config: rounded or plain (square).
     pub(super) fn border_type(&self) -> BorderType {
@@ -83,20 +110,23 @@ impl App {
         self.ui_state.project_colors = self.project_color_map();
     }
 
-    /// Rebuild the active theme from the current config's preset + overrides,
-    /// then refresh the derived project-colour cache. Call after any mutation
-    /// of `self.config.theme` (settings apply, config hot-reload): the cache is
-    /// otherwise only rebuilt in `refresh_list_items`, so card border/title
-    /// colours would show the old theme until an unrelated tick refreshed them.
+    /// Rebuild the active theme from the current config — the active
+    /// workspace's theme once there are workspaces to be in
+    /// ([`Self::theme_workspace`]), else the usual `[theme]` — then refresh the
+    /// derived project-colour cache. Call after any mutation of
+    /// `self.config.theme` or `self.config.workspace_themes` (settings apply,
+    /// config hot-reload, a workspace rename or delete): the cache is otherwise
+    /// only rebuilt in `refresh_list_items`, so card border/title colours would
+    /// show the old theme until an unrelated tick refreshed them. A workspace
+    /// *switch* needs no call: `refresh_list_items` notices the change
+    /// ([`Self::sync_workspace_theme`]).
     pub(super) fn reload_theme(&mut self) {
-        let base = self
-            .config
-            .theme
-            .preset
-            .as_deref()
-            .and_then(Theme::from_preset)
-            .unwrap_or_default();
-        self.theme = base.with_overrides(&self.config.theme);
+        let workspace = self.theme_workspace();
+        self.theme = match &workspace {
+            Some(ws) => crate::theme::theme_for_workspace(&self.config, ws.as_deref()),
+            None => Theme::from_overrides(&self.config.theme),
+        };
+        self.ui_state.theme_workspace = workspace;
         self.rebuild_project_colors();
     }
 
@@ -205,7 +235,11 @@ impl App {
         let sessions = self.ui_state.board.worktree_count();
         let projects = self.ui_state.board.projects.len();
 
-        let title_text = " Claude Commander";
+        // Name the workspace once there is more than one to be in.
+        let title_text = match self.visible_active_workspace() {
+            Some(ws) => format!(" Claude Commander \u{00b7} {}", ws.label),
+            None => " Claude Commander".to_string(),
+        };
         // When a project filter is active, name it and how to clear it; the
         // session count then reflects the filtered card count.
         let counts_text = match self.ui_state.board_filter.and_then(|pid| {
@@ -508,12 +542,14 @@ impl App {
         };
         state.set_content(content, inner_height);
         let scroll = state.scroll_offset;
+        let parsed = state.paragraph(dim_opacity);
 
         frame.render_widget(
             Preview::new(content)
+                .with_paragraph(parsed)
                 .block(block)
                 .scroll(scroll)
-                .dim_opacity(dim_opacity),
+                .dim_opacity(None),
             area,
         );
     }
@@ -663,11 +699,13 @@ impl App {
         let restart_needed = self.service.restart_required();
 
         // Count sessions across every backend's snapshot so the bar is correct
-        // in the list views too (the board is only built in board view).
+        // in the list views too (the board is only built in board view) —
+        // within the active workspace, like the views themselves.
+        let filter = self.workspace_filter();
         let session_count: usize = self
             .backends
             .iter()
-            .map(|h| h.view.snapshot.sessions.len())
+            .map(|h| filter.scope(&h.view.snapshot).sessions.len())
             .sum();
 
         let sessions_span = Span::styled(
@@ -702,18 +740,56 @@ impl App {
         let commander_agent_state = self
             .ui_state
             .agent_states
-            .get(&claude_commander_core::commander::commander_sentinel_id())
+            .get(&claude_commander_protocol::session::COMMANDER_SENTINEL_ID)
             .copied();
-        if let Some(label) =
-            commander_chip_label(self.ui_state.commander_running, commander_agent_state)
-        {
+        let commander_chip_shown =
+            match commander_chip_label(self.ui_state.commander_running, commander_agent_state) {
+                Some(label) => {
+                    left_spans.splice(
+                        1..1,
+                        [
+                            Span::styled(" \u{2502} ", base_style),
+                            Span::styled(
+                                label,
+                                base_style.fg(self.theme.on_status_bar(self.theme.status_running)),
+                            ),
+                        ],
+                    );
+                    true
+                }
+                None => false,
+            };
+
+        // Same reasoning as the commander chip, and spliced after it so the two
+        // keep a stable order regardless of which is present.
+        if let Some(label) = server_chip_label(self.ui_state.embedded_server.as_ref()) {
+            let colour = match self.ui_state.embedded_server {
+                Some(EmbeddedServerStatus::Failed { .. }) => self.theme.modal_error,
+                _ => self.theme.status_running,
+            };
+            let at = left_spans
+                .len()
+                .min(1 + usize::from(commander_chip_shown) * 2);
             left_spans.splice(
-                1..1,
+                at..at,
                 [
                     Span::styled(" \u{2502} ", base_style),
-                    Span::styled(label, base_style.fg(self.theme.status_running)),
+                    Span::styled(label, base_style.fg(self.theme.on_status_bar(colour))),
                 ],
             );
+        }
+
+        // The workspace chip and the other workspaces' waiting hints lead the
+        // bar, ahead of everything spliced above (whose indices assume the
+        // session count is first, so this goes in last). Absent until a second
+        // workspace exists.
+        let workspace_spans = self.workspace_status_spans(base_style);
+        if !workspace_spans.is_empty() {
+            let mut lead = vec![Span::styled(" ", base_style)];
+            lead.extend(workspace_spans);
+            // `Sessions` leads with its own space, so the separator doesn't.
+            lead.push(Span::styled(" \u{2502}", base_style));
+            left_spans.splice(0..0, lead);
         }
 
         // A trailing separator visually detaches the buttons from the status.

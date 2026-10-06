@@ -1,6 +1,6 @@
 //! An in-memory [`CommanderBackend`] test double.
 //!
-//! [`MockBackend`] serves a fixed [`WorkspaceSnapshot`] + agent states and
+//! [`MockBackend`] serves a fixed [`Snapshot`] + agent states and
 //! exposes a drivable connection watch + change feed, so multi-backend TUI tests
 //! can stand up a fake remote server without any network or tmux. Mutations are
 //! accepted as no-ops (tests assert on rendering/selection, not persistence);
@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    SetSessionBaseOutcome, WorkspaceSnapshot,
+    SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -28,16 +28,32 @@ use claude_commander_protocol::github::{
 use claude_commander_protocol::hosting::{
     CloneSource, CodeHost, CodeHostProvider, RepositoryListing,
 };
+use claude_commander_protocol::workspace::{SetWorkspacesRequest, WorkspaceDef};
 
 use super::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
     BackendDescriptor, BackendError, BackendKind, CommanderBackend, ConnectionState,
 };
 
+/// One workspace mutation a [`MockBackend`] received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockWorkspaceCall {
+    SetWorkspaces(SetWorkspacesRequest),
+    Rename {
+        from: String,
+        to: String,
+    },
+    Delete(String),
+    SetProject {
+        id: ProjectId,
+        workspace: Option<String>,
+    },
+}
+
 /// See the module docs.
 pub struct MockBackend {
     descriptor: BackendDescriptor,
-    snapshot: Mutex<WorkspaceSnapshot>,
+    snapshot: Mutex<Snapshot>,
     states: Mutex<AgentStatesSnapshot>,
     branches: Mutex<Vec<BranchInfo>>,
     fail: Mutex<bool>,
@@ -64,6 +80,8 @@ pub struct MockBackend {
     /// When set, [`Self::mark_read`] awaits this gate before recording — lets a
     /// test hold the call open to prove the caller doesn't block on it.
     mark_read_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    fresh_states_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    agent_states_calls: Mutex<Vec<bool>>,
     /// Sessions passed to [`Self::refresh_review_if_changed`], for routing asserts.
     review_refreshed: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::list_comments`], for routing asserts.
@@ -104,6 +122,14 @@ pub struct MockBackend {
     /// answers with the first id rather than a fresh one — the contract a real
     /// backend's `POST /projects/ensure` provides.
     ensured_ids: Mutex<HashMap<std::path::PathBuf, ProjectId>>,
+    /// The `workspace` argument of every [`Self::add_project`] /
+    /// [`Self::ensure_project`] call, in call order (both methods share one
+    /// log, parallel to call order across the two).
+    project_add_workspaces: Mutex<Vec<Option<String>>>,
+    /// Every workspace mutation, in call order. The mock also *applies* each
+    /// one to its snapshot (and bumps the change feed), so a test sees the
+    /// effect a real backend would have.
+    workspace_calls: Mutex<Vec<MockWorkspaceCall>>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -112,7 +138,7 @@ pub struct MockBackend {
 
 impl MockBackend {
     /// A remote-kind mock named `name` serving `snapshot`, initially connected.
-    pub fn new(name: impl Into<String>, snapshot: WorkspaceSnapshot) -> Self {
+    pub fn new(name: impl Into<String>, snapshot: Snapshot) -> Self {
         let (conn_tx, conn_rx) = watch::channel(ConnectionState::Connected);
         let (gen_tx, gen_rx) = watch::channel(0u64);
         Self {
@@ -137,6 +163,8 @@ impl MockBackend {
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
             mark_read_gate: Mutex::new(None),
+            fresh_states_gate: Mutex::new(None),
+            agent_states_calls: Mutex::new(Vec::new()),
             review_refreshed: Mutex::new(Vec::new()),
             listed_comments: Mutex::new(Vec::new()),
             created_comments: Mutex::new(Vec::new()),
@@ -157,6 +185,8 @@ impl MockBackend {
             added_projects: Mutex::new(Vec::new()),
             ensured_projects: Mutex::new(Vec::new()),
             ensured_ids: Mutex::new(HashMap::new()),
+            project_add_workspaces: Mutex::new(Vec::new()),
+            workspace_calls: Mutex::new(Vec::new()),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -242,6 +272,23 @@ impl MockBackend {
         gate
     }
 
+    /// Set the agent-state response independently of the snapshot/change feed.
+    pub fn set_agent_states(&self, states: AgentStatesSnapshot) {
+        *self.states.lock().unwrap() = states;
+    }
+
+    /// Hold fresh agent detection until the test releases the returned gate.
+    pub fn block_fresh_agent_states(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.fresh_states_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    /// Record whether callers requested cache reads or fresh detection.
+    pub fn agent_states_calls(&self) -> Vec<bool> {
+        self.agent_states_calls.lock().unwrap().clone()
+    }
+
     /// Sessions passed to [`Self::refresh_review_if_changed`], in call order.
     pub fn review_refreshed_sessions(&self) -> Vec<SessionId> {
         self.review_refreshed.lock().unwrap().clone()
@@ -289,6 +336,25 @@ impl MockBackend {
     /// Paths passed to [`Self::add_project`], in call order.
     pub fn added_projects(&self) -> Vec<std::path::PathBuf> {
         self.added_projects.lock().unwrap().clone()
+    }
+
+    /// The `workspace` passed to each `add_project` / `ensure_project` call, in
+    /// call order.
+    pub fn project_add_workspaces(&self) -> Vec<Option<String>> {
+        self.project_add_workspaces.lock().unwrap().clone()
+    }
+
+    /// Every workspace mutation received, in call order.
+    pub fn workspace_calls(&self) -> Vec<MockWorkspaceCall> {
+        self.workspace_calls.lock().unwrap().clone()
+    }
+
+    /// Record a workspace call, apply `f` to the served snapshot, and bump the
+    /// change feed.
+    fn workspace_mutation(&self, call: MockWorkspaceCall, f: impl FnOnce(&mut Snapshot)) {
+        self.workspace_calls.lock().unwrap().push(call);
+        f(&mut self.snapshot.lock().unwrap());
+        self.gen_tx.send_modify(|g| *g = g.wrapping_add(1));
     }
 
     /// Paths passed to [`Self::ensure_project`], in call order (repeats included).
@@ -357,12 +423,17 @@ impl CommanderBackend for MockBackend {
         Some(self.conn_rx.clone())
     }
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
+    async fn snapshot(&self) -> BResult<Snapshot> {
         self.guard()?;
         Ok(self.snapshot.lock().unwrap().clone())
     }
 
-    async fn agent_states(&self, _fresh: bool) -> BResult<AgentStatesSnapshot> {
+    async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
+        self.agent_states_calls.lock().unwrap().push(fresh);
+        let gate = self.fresh_states_gate.lock().unwrap().clone();
+        if fresh && let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.guard()?;
         Ok(self.states.lock().unwrap().clone())
     }
@@ -509,15 +580,25 @@ impl CommanderBackend for MockBackend {
         Ok(())
     }
 
-    async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId> {
+    async fn add_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId> {
         self.guard()?;
         self.added_projects.lock().unwrap().push(path);
+        self.project_add_workspaces.lock().unwrap().push(workspace);
         Ok(ProjectId::new())
     }
 
-    async fn ensure_project(&self, path: std::path::PathBuf) -> BResult<ProjectId> {
+    async fn ensure_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId> {
         self.guard()?;
         self.ensured_projects.lock().unwrap().push(path.clone());
+        self.project_add_workspaces.lock().unwrap().push(workspace);
         // Idempotent like the route it stands in for: a repeated path answers with
         // the id issued the first time. A mock that returned a fresh id each call
         // would let a caller that used the *non*-idempotent `add_project` pass a
@@ -529,7 +610,76 @@ impl CommanderBackend for MockBackend {
         self.guard()
     }
 
-    async fn scan_directory(&self, _dir: std::path::PathBuf) -> BResult<ScanResult> {
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()> {
+        self.guard()?;
+        self.workspace_mutation(MockWorkspaceCall::SetWorkspaces(req.clone()), |snap| {
+            snap.workspaces = req.workspaces;
+            if let Some(main) = req.main {
+                snap.main_workspace = Some(main);
+            }
+            if let Some(startup) = req.startup_workspace {
+                snap.startup_workspace = startup;
+            }
+        });
+        Ok(())
+    }
+
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()> {
+        self.guard()?;
+        let call = MockWorkspaceCall::Rename {
+            from: from.clone(),
+            to: to.clone(),
+        };
+        self.workspace_mutation(call, |snap| {
+            for def in snap.workspaces.iter_mut().filter(|d| d.name == from) {
+                def.name = to.clone();
+            }
+            for p in &mut snap.projects {
+                if p.workspace.as_deref() == Some(from.as_str()) {
+                    p.workspace = Some(to.clone());
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn delete_workspace(&self, name: String) -> BResult<()> {
+        self.guard()?;
+        self.workspace_mutation(MockWorkspaceCall::Delete(name.clone()), |snap| {
+            snap.workspaces.retain(|d| d.name != name);
+            for p in &mut snap.projects {
+                if p.workspace.as_deref() == Some(name.as_str()) {
+                    p.workspace = None;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()> {
+        self.guard()?;
+        let call = MockWorkspaceCall::SetProject {
+            id,
+            workspace: workspace.clone(),
+        };
+        self.workspace_mutation(call, |snap| {
+            if let Some(name) = &workspace
+                && !snap.workspaces.iter().any(|d| &d.name == name)
+            {
+                snap.workspaces.push(WorkspaceDef::named(name));
+            }
+            if let Some(p) = snap.projects.iter_mut().find(|p| p.id == id) {
+                p.workspace = workspace;
+            }
+        });
+        Ok(())
+    }
+
+    async fn scan_directory(
+        &self,
+        _dir: std::path::PathBuf,
+        _workspace: Option<String>,
+    ) -> BResult<ScanResult> {
         self.unimpl()
     }
 

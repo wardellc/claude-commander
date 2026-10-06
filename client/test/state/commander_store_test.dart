@@ -42,6 +42,63 @@ void main() {
 
   CommanderStore build() => CommanderStore(api: api, config: testConfig);
 
+  test('timed-out clone waits release their subscriptions', () async {
+    final store = build();
+    addTearDown(store.dispose);
+    for (var i = 0; i < 3; i++) {
+      await store.waitForChange(const Duration(milliseconds: 1));
+      expect(store.hasPendingChangeWaiters, isFalse);
+    }
+  });
+
+  test('clone tracking wakes on a server invalidation', () async {
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+    final wake = store.waitForChange(const Duration(seconds: 30));
+    api.emitChange();
+    await wake.timeout(const Duration(seconds: 1));
+  });
+
+  test(
+    'superseded refresh failures cannot overwrite a reconnected store',
+    () async {
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
+      final oldHandle = store.handle!;
+      final oldGate = Completer<void>();
+      final newGate = Completer<void>();
+      addTearDown(() {
+        if (!newGate.isCompleted) newGate.complete();
+      });
+      api.snapshotGates[oldHandle] = oldGate;
+      api.snapshotErrors[oldHandle] = StateError('old server');
+      final oldRefresh = store.refresh();
+      await Future<void>.delayed(Duration.zero);
+      await store.reconnect(otherConfig);
+      api.snapshotGates[store.handle!] = newGate;
+      oldGate.complete();
+      await oldRefresh;
+      expect(store.error, isNull);
+      newGate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(store.config.baseUrl, otherConfig.baseUrl);
+    },
+  );
+
+  test(
+    'a successful mutation refreshes without waiting for the change feed',
+    () async {
+      final store = build();
+      addTearDown(store.dispose);
+      await store.connect();
+      final before = api.countOf('snapshot');
+      await store.renameSession(id, 'new name');
+      expect(api.countOf('snapshot'), greaterThan(before));
+    },
+  );
+
   test('a superseded in-flight connect releases its handle (no leak)', () async {
     final store = build();
     addTearDown(store.dispose);
@@ -69,7 +126,7 @@ void main() {
   });
 
   test(
-    'connect() acquires the handle and populates workspace + agent states',
+    'connect() acquires the handle and populates the snapshot + agent states',
     () async {
       api.connectServerResponse = 'handle-1';
       api.listSessionsResponse = [sessionInfo(id: id, title: 'Alpha')];
@@ -101,14 +158,14 @@ void main() {
 
       var notifications = 0;
       store.addListener(() => notifications++);
-      final refetchesBefore = api.countOf('workspaceSnapshot');
+      final refetchesBefore = api.countOf('snapshot');
 
       // The server state moved: the next snapshot has a new title.
       api.listSessionsResponse = [sessionInfo(id: id, title: 'After')];
       api.emitChange();
       await pumpEventQueue();
 
-      expect(api.countOf('workspaceSnapshot'), greaterThan(refetchesBefore));
+      expect(api.countOf('snapshot'), greaterThan(refetchesBefore));
       expect(store.sessions.single.title, 'After');
       expect(notifications, greaterThan(0));
     },
@@ -128,14 +185,14 @@ void main() {
         if (!gate.isCompleted) gate.complete();
       });
       var armed = false;
-      api.onWorkspaceSnapshot = () {
+      api.onSnapshot = () {
         if (armed) return;
         armed = true;
         api.emitChange(); // queues a follow-up refresh
-        api.workspaceSnapshotGate = gate; // which will park
+        api.snapshotGate = gate; // which will park
       };
 
-      final before = api.countOf('workspaceSnapshot');
+      final before = api.countOf('snapshot');
       var done = false;
       unawaited(store.refresh().then((_) => done = true));
       await pumpEventQueue();
@@ -146,7 +203,7 @@ void main() {
       // spinner waiting on them (e.g. the Edit server form's Save).
       expect(done, isTrue);
       // The follow-up did still fire — it's parked on the gate, not skipped.
-      expect(api.countOf('workspaceSnapshot'), before + 2);
+      expect(api.countOf('snapshot'), before + 2);
     },
   );
 
@@ -211,7 +268,7 @@ void main() {
       addTearDown(store.dispose);
       await store.connect();
 
-      // Edit #1 (the real flow: WorkspaceStore.updateServer applies the config,
+      // Edit #1 (the real flow: FleetStore.updateServer applies the config,
       // persists, then reconnects). Its reconnect parks while releasing handle-1.
       final gate = Completer<void>();
       api.disconnectGate = gate;

@@ -12,6 +12,7 @@ use claude_commander_core::SessionStatus;
 use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};
 use claude_commander_core::git::GitBackend;
+use claude_commander_core::git::fixture::fixture_git;
 use claude_commander_core::session::SessionManager;
 use claude_commander_core::tmux::TmuxExecutor;
 
@@ -139,7 +140,7 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
     let repo_path = temp_dir.path().to_path_buf();
 
     // Initialize git repo
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["init"])
         .output()
@@ -147,14 +148,14 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
         .unwrap();
 
     // Configure git user for commits
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["config", "user.email", "test@test.com"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["config", "user.name", "Test User"])
         .output()
@@ -167,14 +168,14 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["add", "README.md"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&repo_path)
         .args(["commit", "-m", "Initial commit"])
         .output()
@@ -200,7 +201,7 @@ async fn init_repo_at(path: &std::path::Path) {
 
 /// Run a git command in `dir`, asserting it succeeds.
 async fn run_git(dir: &std::path::Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
+    let output = fixture_git()
         .current_dir(dir)
         .args(args)
         .output()
@@ -216,7 +217,7 @@ async fn run_git(dir: &std::path::Path, args: &[&str]) {
 
 /// Run a git command in `dir` and return its trimmed stdout.
 async fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
-    let output = tokio::process::Command::new("git")
+    let output = fixture_git()
         .current_dir(dir)
         .args(args)
         .output()
@@ -298,7 +299,7 @@ async fn test_session_manager_add_project() {
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project
-    let result = manager.add_project(repo_path.clone()).await;
+    let result = manager.add_project(repo_path.clone(), None).await;
     assert!(result.is_ok(), "Should add project: {:?}", result.err());
 
     let project_id = result.unwrap();
@@ -344,7 +345,7 @@ async fn test_scan_directory_discovers_dedupes_and_prunes() {
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // First scan: discovers repo_a and nested/repo_b; inner_repo is pruned.
-    let result = manager.scan_directory(root).await.unwrap();
+    let result = manager.scan_directory(root, None).await.unwrap();
     assert_eq!(
         result.added, 2,
         "should add only repo_a and nested/repo_b (inner repo pruned)"
@@ -357,7 +358,7 @@ async fn test_scan_directory_discovers_dedupes_and_prunes() {
     );
 
     // Second scan over the same tree: every repo is now a known duplicate.
-    let result = manager.scan_directory(root).await.unwrap();
+    let result = manager.scan_directory(root, None).await.unwrap();
     assert_eq!(result.added, 0, "re-scan must add nothing");
     assert_eq!(
         result.skipped, 2,
@@ -392,7 +393,7 @@ async fn test_session_manager_create_session() {
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
 
     // Create session (prepare + finalize)
     let session_id = manager
@@ -448,22 +449,15 @@ async fn test_session_manager_restart() {
     let worktrees_dir = TempDir::new().unwrap();
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        // This test bypasses `create_isolated_config_store`, so pin the tmux
-        // socket dir directly to keep it off the developer's real server.
-        tmux_tmpdir: Some(isolated_tmux_tmpdir(&state_temp_dir)),
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project and create session (prepare + finalize)
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let session_id = manager
         .prepare_session(
             &project_id,
@@ -557,7 +551,7 @@ async fn test_change_program_updates_field_and_relaunches() {
         FrontendInfo::new("integration-test", "0.0.0"),
     );
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let session_id = manager
         .prepare_session(
             &project_id,
@@ -634,7 +628,7 @@ async fn test_delete_stopped_session_removes_worktree() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let session_id = manager
         .prepare_session(
             &project_id,
@@ -704,7 +698,7 @@ async fn test_remove_project_removes_session_worktrees() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let session_id = manager
         .prepare_session(&project_id, "s".to_string(), Some("bash".to_string()), None)
         .await
@@ -797,7 +791,7 @@ async fn test_sync_worktrees_imports_external() {
     let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project (no worktrees yet)
-    let project_id = manager.add_project(repo_path.clone()).await.unwrap();
+    let project_id = manager.add_project(repo_path.clone(), None).await.unwrap();
 
     // Verify no sessions were imported (no external worktrees exist)
     {
@@ -808,7 +802,7 @@ async fn test_sync_worktrees_imports_external() {
 
     // Create an external worktree via git CLI (simulating Claude Code /worktree or manual creation)
     let external_wt_path = worktrees_dir.path().join("external-feature");
-    let output = tokio::process::Command::new("git")
+    let output = fixture_git()
         .current_dir(&repo_path)
         .args([
             "worktree",
@@ -857,7 +851,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
     let bare_dir = TempDir::new().unwrap();
     let bare_path = bare_dir.path().to_path_buf();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&bare_path)
         .args(["init", "--bare"])
         .output()
@@ -868,7 +862,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
     let work_dir = TempDir::new().unwrap();
     let work_path = work_dir.path().to_path_buf();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["init"])
         .output()
@@ -880,7 +874,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
         vec!["config", "user.email", "test@test.com"],
         vec!["config", "user.name", "Test User"],
     ] {
-        tokio::process::Command::new("git")
+        fixture_git()
             .current_dir(&work_path)
             .args(&args)
             .output()
@@ -889,7 +883,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
     }
 
     // Add remote
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["remote", "add", "origin", bare_path.to_str().unwrap()])
         .output()
@@ -901,21 +895,21 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["add", "README.md"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["commit", "-m", "Initial commit"])
         .output()
         .await
         .unwrap();
 
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["push", "-u", "origin", "HEAD"])
         .output()
@@ -930,7 +924,7 @@ async fn test_detect_main_branch_with_remote() {
     let (_bare_dir, _bare_path, _work_dir, work_path) = create_test_repo_with_remote().await;
 
     // Set origin/HEAD so remote_default_branch() can resolve it
-    tokio::process::Command::new("git")
+    fixture_git()
         .current_dir(&work_path)
         .args(["remote", "set-head", "origin", "--auto"])
         .output()
@@ -967,7 +961,7 @@ async fn test_create_session_no_remote_falls_back() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
 
     let session_id = manager
         .prepare_session(
@@ -1017,7 +1011,7 @@ async fn test_base_branch_links_stack_parent_when_session_matches() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
 
     // Create parent session
     let parent_id = manager
@@ -1097,7 +1091,7 @@ async fn test_base_branch_no_link_when_no_session_matches() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
 
     // Create session with base_branch that doesn't match any session
     let session_id = manager
@@ -1176,7 +1170,7 @@ async fn test_base_branch_forks_new_branch_off_base() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path.clone()).await.unwrap();
+    let project_id = manager.add_project(repo_path.clone(), None).await.unwrap();
 
     let session_id = manager
         .prepare_session(
@@ -1244,7 +1238,7 @@ async fn test_stacked_session_gets_own_branch_not_parents() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
 
     // Create parent session (gets branch "parent-session")
     let parent_id = manager
@@ -1445,7 +1439,7 @@ async fn test_commander_session_lifecycle() {
 
 /// Helper to check if git-lfs is available.
 async fn git_lfs_available() -> bool {
-    tokio::process::Command::new("git")
+    fixture_git()
         .args(["lfs", "version"])
         .output()
         .await
@@ -1546,7 +1540,7 @@ async fn test_failed_finalize_removes_created_worktree() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path.clone()).await.unwrap();
+    let project_id = manager.add_project(repo_path.clone(), None).await.unwrap();
     let session_id = manager
         .prepare_session(
             &project_id,
@@ -1575,7 +1569,7 @@ async fn test_failed_finalize_removes_created_worktree() {
 
     // …and unregistered from git, so retrying the same title succeeds once
     // tmux works again.
-    let out = tokio::process::Command::new("git")
+    let out = fixture_git()
         .arg("-C")
         .arg(&repo_path)
         .args(["worktree", "list"])
@@ -1610,18 +1604,19 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "hibernation must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let session_id = manager
         .prepare_session(
             &project_id,
@@ -1710,18 +1705,19 @@ async fn test_manual_kill_marks_session_for_resume_on_wake() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "manual kill must use a private tmux server, including on wake"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let session_id = manager
         .prepare_session(
             &project_id,
@@ -1824,7 +1820,7 @@ async fn test_ensure_attachable_by_tmux_name_revives_dead_session() {
         FrontendInfo::new("integration-test", "0.0.0"),
     );
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let prepared = manager
         .prepare_session(
             &project_id,
@@ -1895,18 +1891,19 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         resume_session: false,
-        // `projects_dir` defaults to the user's REAL `~/Projects`, which the
-        // repo-clone paths write into. This test bypasses
-        // `create_isolated_config_store`, so pin it directly.
-        projects_dir: Some(state_temp_dir.path().join("projects")),
         ..Config::default()
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    assert_eq!(
+        config_store.read().tmux_tmpdir,
+        Some(state_temp_dir.path().join("tmux")),
+        "fresh restart must use a private tmux server"
+    );
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let session_id = manager
         .prepare_session(
             &project_id,
@@ -2038,7 +2035,7 @@ async fn test_paste_image_writes_file_and_injects_path() {
         FrontendInfo::new("integration-test", "0.0.0"),
     );
 
-    let project_id = manager.add_project(repo_path).await.unwrap();
+    let project_id = manager.add_project(repo_path, None).await.unwrap();
     let prepared = manager
         .prepare_session(
             &project_id,
@@ -2154,8 +2151,14 @@ async fn ensure_project_returns_the_existing_id_for_a_registered_path() {
     let temp_dir = TempDir::new().unwrap();
     let service = service_for(&temp_dir);
 
-    let first = service.ensure_project(repo_path.clone()).await.unwrap();
-    let second = service.ensure_project(repo_path.clone()).await.unwrap();
+    let first = service
+        .ensure_project(repo_path.clone(), None)
+        .await
+        .unwrap();
+    let second = service
+        .ensure_project(repo_path.clone(), None)
+        .await
+        .unwrap();
 
     assert_eq!(first, second, "the same path must answer with the same id");
     assert_eq!(
@@ -2183,8 +2186,8 @@ async fn ensure_project_deduplicates_a_non_canonical_spelling_of_the_same_repo()
 
     // Register through the canonical path, then ensure through the symlink: one
     // checkout, two spellings.
-    let first = service.add_project(repo_path.clone()).await.unwrap();
-    let second = service.ensure_project(link.clone()).await.unwrap();
+    let first = service.add_project(repo_path.clone(), None).await.unwrap();
+    let second = service.ensure_project(link.clone(), None).await.unwrap();
 
     assert_eq!(
         first, second,

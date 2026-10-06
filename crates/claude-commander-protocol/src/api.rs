@@ -21,9 +21,11 @@ use crate::diff::ParsedDiff;
 use crate::hosting::CodeHostProvider;
 use crate::pr::{PrState, ReviewDecision};
 use crate::session::{AgentState, ProjectId, SessionId, SessionStatus};
+use crate::workspace::{StartupWorkspace, WorkspaceDef};
 
 /// A session as returned by the list/find/detail endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionInfo {
     pub id: String,
     pub session_id: SessionId,
@@ -92,6 +94,7 @@ pub struct SessionInfo {
 /// A session plus its live detail: agent sub-state, diff summary, and a pane
 /// snapshot. `info` is flattened so the JSON is a single object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SessionDetail {
     #[serde(flatten)]
     pub info: SessionInfo,
@@ -102,6 +105,7 @@ pub struct SessionDetail {
 
 /// Request to stage a new comment on a session's review diff.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct NewComment {
     pub file: String,
     pub side: CommentSide,
@@ -115,6 +119,7 @@ pub struct NewComment {
 /// so clients never echo (or cache) the full `FileDiff` and a mark can't be
 /// recorded against a stale copy of the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToggleReviewed {
     pub display_path: String,
 }
@@ -122,6 +127,7 @@ pub struct ToggleReviewed {
 /// Which side of a diff a binary blob fetch refers to: the base ("before") or
 /// the working tree ("after").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DiffSide {
     Old,
@@ -131,6 +137,7 @@ pub enum DiffSide {
 /// Result of opening the review view: the parsed diff plus the session's
 /// (re-anchored) comments and the base they were computed against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReviewSnapshot {
     pub base: String,
     pub diff: ParsedDiff,
@@ -140,6 +147,15 @@ pub struct ReviewSnapshot {
     /// xxh3 hash of the raw unified diff this snapshot was built from, so an
     /// open review view can cheaply tell whether a re-compose actually changed
     /// anything before rebuilding.
+    ///
+    /// Typed `unknown` in the generated TypeScript: a u64 hash routinely exceeds
+    /// 2^53, so `JSON.parse` rounds it to the nearest double, and a browser that
+    /// echoed it back as `prev_hash` would never match — every refresh would
+    /// re-send the whole snapshot. The wire stays a JSON number (the Rust and
+    /// Flutter clients read it losslessly). A web client must not
+    /// treat it as a number; it only matters once the page uses refresh-by-hash,
+    /// which will need the raw digits (or a string form) rather than this field.
+    #[cfg_attr(feature = "ts", ts(type = "unknown"))]
     pub content_hash: u64,
     /// Comments discarded while building this snapshot because the file they
     /// were written against had left the diff entirely (the change was
@@ -168,6 +184,7 @@ pub struct ReviewSnapshot {
 /// Options for creating a session (request body for `POST /sessions`). Optional
 /// fields default to absent so a minimal `{project_path, title}` body is valid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CreateSessionOpts {
     pub project_path: PathBuf,
     pub title: String,
@@ -196,6 +213,7 @@ pub struct CreateSessionOpts {
 ///
 /// FLUTTER: mirror this DTO in the Dart model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProjectInfo {
     pub id: ProjectId,
     pub name: String,
@@ -210,6 +228,30 @@ pub struct ProjectInfo {
     /// repo has several spellings. Additive; older servers omit it.
     #[serde(default)]
     pub origin_url: Option<String>,
+    /// Name of the workspace this project is tagged with; `None` is the
+    /// built-in Main workspace. Additive: an older server omits it (every
+    /// project reads as Main), and an older client ignores it.
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// Body for `POST /projects`, `POST /projects/ensure` and `POST
+/// /projects/scan` (where `path` is the directory to scan).
+///
+/// `workspace` tags a *newly registered* project (so it lands in the caller's
+/// active workspace); `ensure` and `scan` never re-tag a project that already
+/// exists.
+/// Additive: an older client sends only `path`, and the project lands in Main.
+///
+/// FLUTTER: mirror this DTO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct AddProjectRequest {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Why a background fast-forward of a project's main branch was held back.
@@ -217,6 +259,7 @@ pub struct ProjectInfo {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PullBlockReason {
     Dirty,
@@ -229,6 +272,7 @@ pub enum PullBlockReason {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PullStatus {
     /// Fast-forward applied.
@@ -245,6 +289,7 @@ pub enum PullStatus {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     Cascade,
@@ -255,6 +300,7 @@ pub enum OperationKind {
 ///
 /// FLUTTER: mirror this enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OperationOutcome {
     /// Completed cleanly. `detail` is a short human summary (e.g. "3 merged").
@@ -266,10 +312,11 @@ pub enum OperationOutcome {
 }
 
 /// One entry in the service's in-memory ring ledger of recent cascade /
-/// push-stack operations, surfaced through [`WorkspaceSnapshot`].
+/// push-stack operations, surfaced through [`Snapshot`].
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct OperationStatus {
     /// Monotonic id assigned by the service (stable for the process lifetime).
     pub id: u64,
@@ -285,6 +332,7 @@ pub struct OperationStatus {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ServerStatus {
     /// Whether the `gh` CLI is installed and runnable.
     pub gh_available: bool,
@@ -298,6 +346,7 @@ pub struct ServerStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CodeHostStatus {
     pub provider: CodeHostProvider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,7 +381,8 @@ impl ServerStatus {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceSnapshot {
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Snapshot {
     pub projects: Vec<ProjectInfo>,
     pub sessions: Vec<SessionInfo>,
     /// The session a paused cascade is stalled at, if any.
@@ -349,12 +399,30 @@ pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub operations: Vec<OperationStatus>,
     pub server: ServerStatus,
+    /// This server's workspace definitions, in configured order. Additive: an
+    /// older server omits it (it has only Main).
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceDef>,
+    /// Label of this server's built-in Main workspace; `None` means
+    /// the default label ([`MAIN_WORKSPACE_LABEL`](crate::workspace::MAIN_WORKSPACE_LABEL)).
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub main_workspace: Option<WorkspaceDef>,
+    /// This server's configured `startup_workspace`.
+    ///
+    /// FLUTTER: mirror this field.
+    #[serde(default)]
+    pub startup_workspace: StartupWorkspace,
 }
 
 /// Bulk agent-state snapshot for active sessions.
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgentStatesSnapshot {
     /// Per-session agent state, keyed by session id. NOTE: when a commander is
     /// running, this map also carries one synthetic entry under the commander
@@ -375,6 +443,7 @@ pub struct AgentStatesSnapshot {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PreviewData {
     #[serde(default)]
     pub pane: Option<String>,
@@ -394,6 +463,7 @@ pub struct PreviewData {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DiffStat {
     pub files_changed: usize,
     pub lines_added: usize,
@@ -404,6 +474,7 @@ pub struct DiffStat {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ProgramInfo {
     pub label: String,
     pub command: String,
@@ -416,6 +487,7 @@ pub struct ProgramInfo {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetProgramsRequest {
     pub programs: Vec<ProgramInfo>,
 }
@@ -425,6 +497,7 @@ pub struct SetProgramsRequest {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CreateOptions {
     pub default_program: String,
     pub programs: Vec<ProgramInfo>,
@@ -436,6 +509,7 @@ pub struct CreateOptions {
 ///
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct BranchInfo {
     pub name: String,
     pub is_remote: bool,
@@ -443,6 +517,7 @@ pub struct BranchInfo {
 
 /// Request body for renaming a session (`PATCH /sessions/{id}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RenameSession {
     pub title: String,
 }
@@ -450,6 +525,7 @@ pub struct RenameSession {
 /// Request body for moving a session to a section (`PATCH /sessions/{id}`).
 /// `section: None` clears the manual override and re-runs predicate assignment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetSection {
     #[serde(default)]
     pub section: Option<String>,
@@ -463,6 +539,7 @@ pub struct SetSection {
 /// branch from that session (or the project's main branch), so a client can
 /// never disagree with it about where the session actually landed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetSessionBase {
     #[serde(default)]
     pub parent_session_id: Option<SessionId>,
@@ -475,6 +552,7 @@ pub struct SetSessionBase {
 /// failed edit is not cosmetic — the next PR sync overwrites the local mirror
 /// from GitHub, so an unreported failure silently reverts the retarget.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrRetarget {
     /// The session has no PR, so there was nothing to retarget.
@@ -488,6 +566,7 @@ pub enum PrRetarget {
 
 /// Result of retargeting a session's stack base.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SetSessionBaseOutcome {
     /// The branch the session is now based on.
     pub new_base_branch: String,
@@ -501,13 +580,178 @@ pub struct SetSessionBaseOutcome {
 /// The new program is the command that will be relaunched in the pane; the
 /// owning host relaunches the agent fresh so it takes effect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ChangeProgram {
     pub program: String,
+}
+
+/// `PATCH /sessions/{id}` body: rename a session, move it to a section
+/// (`section: null` clears the manual override), or change its launch program.
+/// Tagged by `op` so a section clear (`null`) is unambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PatchSession {
+    Rename(RenameSession),
+    SetSection(SetSection),
+    ChangeProgram(ChangeProgram),
+}
+
+/// `POST /sessions/unread` body: the session ids (full UUIDs) to flag unread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct MarkUnread {
+    pub ids: Vec<String>,
+}
+
+/// `201` body of the create routes (`POST /sessions`, `/projects`,
+/// `/projects/ensure`, `/sessions/{id}/comments`): the new resource's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CreatedId<T> {
+    pub id: T,
+}
+
+/// `POST /sessions/{id}/files/reviewed` response: the file's reviewed mark
+/// after the toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ReviewedToggle {
+    pub reviewed: bool,
+}
+
+/// `POST /projects/scan` response: how many repositories under the scanned
+/// directory were newly registered, and how many were already known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ScanResponse {
+    pub added: usize,
+    pub skipped: usize,
+}
+
+/// `POST /config/reload` response: `true` when the on-disk config differed
+/// from the live one and was re-read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ConfigReloaded {
+    pub reloaded: bool,
+}
+
+/// `POST /sessions/{id}/paste-image` response: the absolute path the image was
+/// written to *on the server* (the path injected into the pane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct PastedImage {
+    pub path: String,
+}
+
+/// The uniform error envelope every non-2xx JSON response carries:
+/// `{"error": {"kind", "message"}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ApiErrorBody {
+    pub error: ApiErrorDetail,
+}
+
+/// The inside of [`ApiErrorBody`]. `kind` is a short machine-readable category
+/// (`session`, `tmux`, `git`, `config`, `io`, `tts`, `auth`, `request`, ...);
+/// `message` is safe to show the user and never carries a credential.
+///
+/// `kind` defaults to empty when absent, so a client still surfaces `message`
+/// from an error body that omits it rather than failing the whole parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ApiErrorDetail {
+    #[serde(default)]
+    pub kind: String,
+    pub message: String,
+}
+
+impl ApiErrorBody {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error: ApiErrorDetail {
+                kind: kind.into(),
+                message: message.into(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The small response envelopes are built by the server and parsed by every
+    /// client, so their exact JSON is pinned here — these were ad-hoc `json!`
+    /// literals before they were typed, and the move must not change a byte.
+    #[test]
+    fn response_envelopes_have_the_pinned_wire_shape() {
+        let sid = SessionId::from_uuid(uuid::Uuid::from_u128(1));
+        assert_eq!(
+            serde_json::to_string(&CreatedId { id: sid }).unwrap(),
+            r#"{"id":"00000000-0000-0000-0000-000000000001"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReviewedToggle { reviewed: true }).unwrap(),
+            r#"{"reviewed":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ScanResponse {
+                added: 2,
+                skipped: 1
+            })
+            .unwrap(),
+            r#"{"added":2,"skipped":1}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfigReloaded { reloaded: false }).unwrap(),
+            r#"{"reloaded":false}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&PastedImage {
+                path: "/srv/x.png".into()
+            })
+            .unwrap(),
+            r#"{"path":"/srv/x.png"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApiErrorBody::new("session", "nope")).unwrap(),
+            r#"{"error":{"kind":"session","message":"nope"}}"#
+        );
+    }
+
+    #[test]
+    fn patch_session_and_mark_unread_have_the_pinned_wire_shape() {
+        let cases = [
+            (
+                PatchSession::Rename(RenameSession { title: "t".into() }),
+                r#"{"op":"rename","title":"t"}"#,
+            ),
+            (
+                PatchSession::SetSection(SetSection { section: None }),
+                r#"{"op":"set_section","section":null}"#,
+            ),
+            (
+                PatchSession::ChangeProgram(ChangeProgram {
+                    program: "claude".into(),
+                }),
+                r#"{"op":"change_program","program":"claude"}"#,
+            ),
+        ];
+        for (patch, json) in cases {
+            assert_eq!(serde_json::to_string(&patch).unwrap(), json);
+            let back: PatchSession = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        assert_eq!(
+            serde_json::to_string(&MarkUnread {
+                ids: vec!["a".into()]
+            })
+            .unwrap(),
+            r#"{"ids":["a"]}"#
+        );
+    }
 
     #[test]
     fn create_session_opts_minimal_body_deserializes() {
@@ -656,12 +900,12 @@ mod tests {
     }
 
     #[test]
-    fn workspace_snapshot_round_trips_with_maps() {
+    fn snapshot_round_trips_with_maps() {
         let pid = ProjectId::new();
         let sid = SessionId::new();
         let mut project_pull = BTreeMap::new();
         project_pull.insert(pid, PullStatus::UpToDate);
-        let snapshot = WorkspaceSnapshot {
+        let snapshot = Snapshot {
             projects: vec![ProjectInfo {
                 id: pid,
                 name: "repo".to_string(),
@@ -669,6 +913,7 @@ mod tests {
                 main_branch: "main".to_string(),
                 session_ids: vec![sid],
                 origin_url: Some("git@github.com:sizeak/claude-commander.git".to_string()),
+                workspace: Some("Work".to_string()),
             }],
             sessions: vec![],
             cascade_paused: Some(sid),
@@ -685,9 +930,16 @@ mod tests {
                 tmux_ok: true,
                 version: "0.0.0".to_string(),
             },
+            workspaces: vec![WorkspaceDef::named("Work")],
+            main_workspace: Some(WorkspaceDef::named("Home")),
+            startup_workspace: StartupWorkspace::Named("Work".to_string()),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
-        let back: WorkspaceSnapshot = serde_json::from_str(&json).unwrap();
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.projects[0].workspace.as_deref(), Some("Work"));
+        assert_eq!(back.workspaces, snapshot.workspaces);
+        assert_eq!(back.main_workspace, snapshot.main_workspace);
+        assert_eq!(back.startup_workspace, snapshot.startup_workspace);
         assert_eq!(back.projects.len(), 1);
         assert_eq!(
             back.projects[0].origin_url.as_deref(),
@@ -698,24 +950,82 @@ mod tests {
         assert!(back.server.gh_available);
     }
 
-    /// A `WorkspaceSnapshot` with the optional collections omitted still
+    /// A `Snapshot` with the optional collections omitted still
     /// deserializes (they default to empty).
     #[test]
-    fn workspace_snapshot_defaults_optional_collections() {
+    fn snapshot_defaults_optional_collections() {
         let json = r#"{
             "projects": [],
             "sessions": [],
             "server": {"gh_available": false, "tmux_ok": false, "version": "x"}
         }"#;
-        let snap: WorkspaceSnapshot = serde_json::from_str(json).unwrap();
+        let snap: Snapshot = serde_json::from_str(json).unwrap();
         assert!(snap.cascade_paused.is_none());
         assert!(snap.pending_comment_sessions.is_empty());
         assert!(snap.project_pull.is_empty());
         assert!(snap.operations.is_empty());
+        // An older server has no workspaces: only Main, default label, `last`.
         assert_eq!(
             snap.server.effective_code_host().provider,
             CodeHostProvider::Github
         );
+        assert!(snap.workspaces.is_empty());
+        assert!(snap.main_workspace.is_none());
+        assert_eq!(snap.startup_workspace, StartupWorkspace::Last);
+    }
+
+    /// The other direction of wire compatibility: an *older client* decoding a
+    /// new server's payload. Its structs lack the workspace fields, and serde's
+    /// default (no `deny_unknown_fields`) must let it ignore them — pinned with
+    /// a stand-in for the pre-workspace shapes so adding `deny_unknown_fields`
+    /// to either DTO would fail here.
+    #[test]
+    fn an_older_client_ignores_the_workspace_fields() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldProjectInfo {
+            id: ProjectId,
+            name: String,
+            repo_path: PathBuf,
+            main_branch: String,
+            session_ids: Vec<SessionId>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSnapshot {
+            projects: Vec<OldProjectInfo>,
+            sessions: Vec<serde_json::Value>,
+            server: ServerStatus,
+        }
+        let json = r##"{
+            "projects": [{
+                "id": "1b4e28ba-2fa1-11d2-883f-b9a761bde3fb",
+                "name": "repo", "repo_path": "/repo", "main_branch": "main",
+                "session_ids": [], "workspace": "Work"
+            }],
+            "sessions": [],
+            "server": {"gh_available": false, "tmux_ok": false, "version": "x"},
+            "workspaces": [{"name": "Work"}],
+            "main_workspace": {"name": "Home"},
+            "startup_workspace": "last"
+        }"##;
+        let old: OldSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(old.projects[0].name, "repo");
+    }
+
+    /// `POST /projects` from an older client (path only) lands in Main; the
+    /// field is skipped on the way out when absent, so a new client talking to
+    /// an old server sends exactly the old body.
+    #[test]
+    fn add_project_request_workspace_is_optional_both_ways() {
+        let old: AddProjectRequest = serde_json::from_str(r#"{"path":"/repo"}"#).unwrap();
+        assert_eq!(old.workspace, None);
+        let body = serde_json::to_string(&AddProjectRequest {
+            path: PathBuf::from("/repo"),
+            workspace: None,
+        })
+        .unwrap();
+        assert_eq!(body, r#"{"path":"/repo"}"#);
     }
 
     /// `origin_url` is additive: a payload from a server that predates it must
@@ -733,6 +1043,7 @@ mod tests {
         let info: ProjectInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.name, "repo");
         assert_eq!(info.origin_url, None);
+        assert_eq!(info.workspace, None, "an older server's project is in Main");
     }
 
     #[test]
@@ -886,6 +1197,16 @@ mod tests {
             assert_eq!(back.new_base_branch, "main");
             assert_eq!(back.old_base_branch.as_deref(), Some("feat"));
         }
+    }
+
+    /// Clients read the envelope leniently: a body with a `message` but no
+    /// `kind` (an older server, a proxy's own JSON error) still yields the
+    /// message instead of falling back to a bare status line.
+    #[test]
+    fn error_body_without_a_kind_still_parses() {
+        let body: ApiErrorBody = serde_json::from_str(r#"{"error":{"message":"busy"}}"#).unwrap();
+        assert_eq!(body.error.message, "busy");
+        assert_eq!(body.error.kind, "");
     }
 
     #[test]

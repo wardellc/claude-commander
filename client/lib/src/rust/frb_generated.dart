@@ -10,11 +10,15 @@ import 'api/registry.dart';
 import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
+import 'api/workspace.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
 import 'frb_generated.io.dart'
     if (dart.library.js_interop) 'frb_generated.web.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
@@ -73,7 +77,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 409149554;
+  int get rustContentHash => -1320545105;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -87,6 +91,7 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiSimpleAddProject({
     required String handle,
     required String path,
+    String? workspace,
   });
 
   Future<AgentStatesSnapshotDto> crateApiSimpleAgentStates({
@@ -168,6 +173,12 @@ abstract class RustLibApi extends BaseApi {
     String? baseBranch,
   });
 
+  List<WorkspaceDef> crateApiWorkspaceDefinitionsForServer({
+    required List<WorkspaceDef> wanted,
+    required List<WorkspaceDef> own,
+    String? mainLabel,
+  });
+
   Future<void> crateApiReviewDeleteComment({
     required String handle,
     required String sessionId,
@@ -177,6 +188,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiSimpleDeleteSession({
     required String handle,
     required String id,
+  });
+
+  Future<void> crateApiSimpleDeleteWorkspace({
+    required String handle,
+    required String name,
   });
 
   Future<DiffLayoutDto> crateApiDiffDiffRows({
@@ -193,6 +209,7 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiSimpleEnsureProject({
     required String handle,
     required String path,
+    String? workspace,
   });
 
   Future<Uint8List> crateApiReviewFetchBlob({
@@ -257,6 +274,10 @@ abstract class RustLibApi extends BaseApi {
     required List<String> ids,
   });
 
+  List<MergedWorkspace> crateApiWorkspaceMergeWorkspaces({
+    required List<WorkspaceSourceDto> sources,
+  });
+
   Future<ReviewSnapshotDto> crateApiReviewOpenReview({
     required String handle,
     required String sessionId,
@@ -299,11 +320,23 @@ abstract class RustLibApi extends BaseApi {
     required String title,
   });
 
+  Future<void> crateApiSimpleRenameWorkspace({
+    required String handle,
+    required String from,
+    required String to,
+  });
+
   Future<RepositoryListing> crateApiSimpleRepositories({
     required String handle,
   });
 
   Future<void> crateApiSimpleRequestPrRefresh({required String handle});
+
+  String? crateApiWorkspaceResolveStartupWorkspace({
+    required String startup,
+    String? last,
+    required List<MergedWorkspace> workspaces,
+  });
 
   Future<void> crateApiSimpleRestartSession({
     required String handle,
@@ -313,6 +346,7 @@ abstract class RustLibApi extends BaseApi {
   Future<ScanResultDto> crateApiSimpleScanDirectory({
     required String handle,
     required String path,
+    String? workspace,
   });
 
   Future<PreviewDataDto> crateApiSimpleSessionPreview({
@@ -333,11 +367,24 @@ abstract class RustLibApi extends BaseApi {
     required List<ProgramInfo> programs,
   });
 
+  Future<void> crateApiSimpleSetProjectWorkspace({
+    required String handle,
+    required String projectId,
+    String? workspace,
+  });
+
   Future<void> crateApiSimpleSetSection({
     required String handle,
     required String id,
     String? section,
   });
+
+  Future<void> crateApiSimpleSetWorkspaces({
+    required String handle,
+    required SetWorkspacesRequestDto request,
+  });
+
+  Future<SnapshotDto> crateApiSimpleSnapshot({required String handle});
 
   Future<CloneJobDto> crateApiSimpleStartClone({
     required String handle,
@@ -368,8 +415,14 @@ abstract class RustLibApi extends BaseApi {
     required String id,
   });
 
-  Future<WorkspaceSnapshotDto> crateApiSimpleWorkspaceSnapshot({
-    required String handle,
+  String? crateApiWorkspaceWorkspaceLabelError({required String raw});
+
+  String? crateApiWorkspaceWorkspaceNameError({required String raw});
+
+  bool crateApiWorkspaceWorkspaceNameTaken({
+    required List<MergedWorkspace> workspaces,
+    required String name,
+    MergedWorkspace? except,
   });
 }
 
@@ -385,6 +438,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<String> crateApiSimpleAddProject({
     required String handle,
     required String path,
+    String? workspace,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -392,6 +446,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(handle, serializer);
           sse_encode_String(path, serializer);
+          sse_encode_opt_String(workspace, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -404,7 +459,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSimpleAddProjectConstMeta,
-        argValues: [handle, path],
+        argValues: [handle, path, workspace],
         apiImpl: this,
       ),
     );
@@ -412,7 +467,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiSimpleAddProjectConstMeta => const TaskConstMeta(
     debugName: "add_project",
-    argNames: ["handle", "path"],
+    argNames: ["handle", "path", "workspace"],
   );
 
   @override
@@ -1018,6 +1073,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  List<WorkspaceDef> crateApiWorkspaceDefinitionsForServer({
+    required List<WorkspaceDef> wanted,
+    required List<WorkspaceDef> own,
+    String? mainLabel,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_workspace_def(wanted, serializer);
+          sse_encode_list_workspace_def(own, serializer);
+          sse_encode_opt_String(mainLabel, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_workspace_def,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiWorkspaceDefinitionsForServerConstMeta,
+        argValues: [wanted, own, mainLabel],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWorkspaceDefinitionsForServerConstMeta =>
+      const TaskConstMeta(
+        debugName: "definitions_for_server",
+        argNames: ["wanted", "own", "mainLabel"],
+      );
+
+  @override
   Future<void> crateApiReviewDeleteComment({
     required String handle,
     required String sessionId,
@@ -1033,7 +1120,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 19,
             port: port_,
           );
         },
@@ -1068,7 +1155,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 20,
             port: port_,
           );
         },
@@ -1087,6 +1174,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "delete_session",
         argNames: ["handle", "id"],
+      );
+
+  @override
+  Future<void> crateApiSimpleDeleteWorkspace({
+    required String handle,
+    required String name,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(handle, serializer);
+          sse_encode_String(name, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleDeleteWorkspaceConstMeta,
+        argValues: [handle, name],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleDeleteWorkspaceConstMeta =>
+      const TaskConstMeta(
+        debugName: "delete_workspace",
+        argNames: ["handle", "name"],
       );
 
   @override
@@ -1111,7 +1233,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 22,
             port: port_,
           );
         },
@@ -1141,7 +1263,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 23,
             port: port_,
           );
         },
@@ -1163,6 +1285,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<String> crateApiSimpleEnsureProject({
     required String handle,
     required String path,
+    String? workspace,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1170,10 +1293,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(handle, serializer);
           sse_encode_String(path, serializer);
+          sse_encode_opt_String(workspace, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 24,
             port: port_,
           );
         },
@@ -1182,7 +1306,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSimpleEnsureProjectConstMeta,
-        argValues: [handle, path],
+        argValues: [handle, path, workspace],
         apiImpl: this,
       ),
     );
@@ -1191,7 +1315,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSimpleEnsureProjectConstMeta =>
       const TaskConstMeta(
         debugName: "ensure_project",
-        argNames: ["handle", "path"],
+        argNames: ["handle", "path", "workspace"],
       );
 
   @override
@@ -1212,7 +1336,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 25,
             port: port_,
           );
         },
@@ -1243,7 +1367,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(haystack, serializer);
           sse_encode_String(needle, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_box_autoadd_i_32,
@@ -1277,7 +1401,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 27,
             port: port_,
           );
         },
@@ -1308,7 +1432,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1336,7 +1460,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 29,
             port: port_,
           );
         },
@@ -1368,7 +1492,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 30,
             port: port_,
           );
         },
@@ -1397,7 +1521,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 31,
             port: port_,
           );
         },
@@ -1424,7 +1548,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 32,
             port: port_,
           );
         },
@@ -1456,7 +1580,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 31,
+            funcId: 33,
             port: port_,
           );
         },
@@ -1492,7 +1616,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1526,7 +1650,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1560,7 +1684,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1594,7 +1718,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1626,7 +1750,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1647,6 +1771,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  List<MergedWorkspace> crateApiWorkspaceMergeWorkspaces({
+    required List<WorkspaceSourceDto> sources,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_workspace_source_dto(sources, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 39)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_merged_workspace,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiWorkspaceMergeWorkspacesConstMeta,
+        argValues: [sources],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWorkspaceMergeWorkspacesConstMeta =>
+      const TaskConstMeta(debugName: "merge_workspaces", argNames: ["sources"]);
+
+  @override
   Future<ReviewSnapshotDto> crateApiReviewOpenReview({
     required String handle,
     required String sessionId,
@@ -1660,7 +1809,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1696,7 +1845,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1728,7 +1877,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 42,
             port: port_,
           );
         },
@@ -1763,7 +1912,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 43,
             port: port_,
           );
         },
@@ -1798,7 +1947,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1832,7 +1981,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 45,
             port: port_,
           );
         },
@@ -1867,7 +2016,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 46,
             port: port_,
           );
         },
@@ -1904,7 +2053,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 47,
             port: port_,
           );
         },
@@ -1926,6 +2075,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiSimpleRenameWorkspace({
+    required String handle,
+    required String from,
+    required String to,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(handle, serializer);
+          sse_encode_String(from, serializer);
+          sse_encode_String(to, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 48,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleRenameWorkspaceConstMeta,
+        argValues: [handle, from, to],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleRenameWorkspaceConstMeta =>
+      const TaskConstMeta(
+        debugName: "rename_workspace",
+        argNames: ["handle", "from", "to"],
+      );
+
+  @override
   Future<RepositoryListing> crateApiSimpleRepositories({
     required String handle,
   }) {
@@ -1937,7 +2123,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 45,
+            funcId: 49,
             port: port_,
           );
         },
@@ -1965,7 +2151,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 46,
+            funcId: 50,
             port: port_,
           );
         },
@@ -1987,6 +2173,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  String? crateApiWorkspaceResolveStartupWorkspace({
+    required String startup,
+    String? last,
+    required List<MergedWorkspace> workspaces,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(startup, serializer);
+          sse_encode_opt_String(last, serializer);
+          sse_encode_list_merged_workspace(workspaces, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 51)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiWorkspaceResolveStartupWorkspaceConstMeta,
+        argValues: [startup, last, workspaces],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWorkspaceResolveStartupWorkspaceConstMeta =>
+      const TaskConstMeta(
+        debugName: "resolve_startup_workspace",
+        argNames: ["startup", "last", "workspaces"],
+      );
+
+  @override
   Future<void> crateApiSimpleRestartSession({
     required String handle,
     required String id,
@@ -2000,7 +2218,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 47,
+            funcId: 52,
             port: port_,
           );
         },
@@ -2025,6 +2243,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<ScanResultDto> crateApiSimpleScanDirectory({
     required String handle,
     required String path,
+    String? workspace,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -2032,10 +2251,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(handle, serializer);
           sse_encode_String(path, serializer);
+          sse_encode_opt_String(workspace, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 48,
+            funcId: 53,
             port: port_,
           );
         },
@@ -2044,7 +2264,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiSimpleScanDirectoryConstMeta,
-        argValues: [handle, path],
+        argValues: [handle, path, workspace],
         apiImpl: this,
       ),
     );
@@ -2053,7 +2273,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiSimpleScanDirectoryConstMeta =>
       const TaskConstMeta(
         debugName: "scan_directory",
-        argNames: ["handle", "path"],
+        argNames: ["handle", "path", "workspace"],
       );
 
   @override
@@ -2072,7 +2292,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 49,
+            funcId: 54,
             port: port_,
           );
         },
@@ -2108,7 +2328,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(branch, serializer);
           sse_encode_String(program, serializer);
           sse_encode_String(query, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 50)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 55)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_box_autoadd_i_32,
@@ -2140,7 +2360,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 51,
+            funcId: 56,
             port: port_,
           );
         },
@@ -2161,6 +2381,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiSimpleSetProjectWorkspace({
+    required String handle,
+    required String projectId,
+    String? workspace,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(handle, serializer);
+          sse_encode_String(projectId, serializer);
+          sse_encode_opt_String(workspace, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 57,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleSetProjectWorkspaceConstMeta,
+        argValues: [handle, projectId, workspace],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleSetProjectWorkspaceConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_project_workspace",
+        argNames: ["handle", "projectId", "workspace"],
+      );
+
+  @override
   Future<void> crateApiSimpleSetSection({
     required String handle,
     required String id,
@@ -2176,7 +2433,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 52,
+            funcId: 58,
             port: port_,
           );
         },
@@ -2197,6 +2454,72 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiSimpleSetWorkspaces({
+    required String handle,
+    required SetWorkspacesRequestDto request,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(handle, serializer);
+          sse_encode_box_autoadd_set_workspaces_request_dto(
+            request,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 59,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleSetWorkspacesConstMeta,
+        argValues: [handle, request],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleSetWorkspacesConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_workspaces",
+        argNames: ["handle", "request"],
+      );
+
+  @override
+  Future<SnapshotDto> crateApiSimpleSnapshot({required String handle}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(handle, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 60,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_snapshot_dto,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleSnapshotConstMeta,
+        argValues: [handle],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleSnapshotConstMeta =>
+      const TaskConstMeta(debugName: "snapshot", argNames: ["handle"]);
+
+  @override
   Future<CloneJobDto> crateApiSimpleStartClone({
     required String handle,
     required CloneRequestDto request,
@@ -2210,7 +2533,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 53,
+            funcId: 61,
             port: port_,
           );
         },
@@ -2240,7 +2563,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 54,
+            funcId: 62,
             port: port_,
           );
         },
@@ -2274,7 +2597,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 55,
+            funcId: 63,
             port: port_,
           );
         },
@@ -2309,7 +2632,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 56,
+            funcId: 64,
             port: port_,
           );
         },
@@ -2346,7 +2669,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 57,
+            funcId: 65,
             port: port_,
           );
         },
@@ -2381,7 +2704,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 58,
+            funcId: 66,
             port: port_,
           );
         },
@@ -2403,36 +2726,84 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<WorkspaceSnapshotDto> crateApiSimpleWorkspaceSnapshot({
-    required String handle,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
+  String? crateApiWorkspaceWorkspaceLabelError({required String raw}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(handle, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 59,
-            port: port_,
-          );
+          sse_encode_String(raw, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 67)!;
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_workspace_snapshot_dto,
-          decodeErrorData: sse_decode_AnyhowException,
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: null,
         ),
-        constMeta: kCrateApiSimpleWorkspaceSnapshotConstMeta,
-        argValues: [handle],
+        constMeta: kCrateApiWorkspaceWorkspaceLabelErrorConstMeta,
+        argValues: [raw],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiSimpleWorkspaceSnapshotConstMeta =>
+  TaskConstMeta get kCrateApiWorkspaceWorkspaceLabelErrorConstMeta =>
       const TaskConstMeta(
-        debugName: "workspace_snapshot",
-        argNames: ["handle"],
+        debugName: "workspace_label_error",
+        argNames: ["raw"],
+      );
+
+  @override
+  String? crateApiWorkspaceWorkspaceNameError({required String raw}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(raw, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 68)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiWorkspaceWorkspaceNameErrorConstMeta,
+        argValues: [raw],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWorkspaceWorkspaceNameErrorConstMeta =>
+      const TaskConstMeta(debugName: "workspace_name_error", argNames: ["raw"]);
+
+  @override
+  bool crateApiWorkspaceWorkspaceNameTaken({
+    required List<MergedWorkspace> workspaces,
+    required String name,
+    MergedWorkspace? except,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_merged_workspace(workspaces, serializer);
+          sse_encode_String(name, serializer);
+          sse_encode_opt_box_autoadd_merged_workspace(except, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 69)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiWorkspaceWorkspaceNameTakenConstMeta,
+        argValues: [workspaces, name, except],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWorkspaceWorkspaceNameTakenConstMeta =>
+      const TaskConstMeta(
+        debugName: "workspace_name_taken",
+        argNames: ["workspaces", "name", "except"],
       );
 
   @protected
@@ -2579,6 +2950,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MergedWorkspace dco_decode_box_autoadd_merged_workspace(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_merged_workspace(raw);
+  }
+
+  @protected
   ProjectId dco_decode_box_autoadd_project_id(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_project_id(raw);
@@ -2627,9 +3004,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SetWorkspacesRequestDto dco_decode_box_autoadd_set_workspaces_request_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_set_workspaces_request_dto(raw);
+  }
+
+  @protected
   int dco_decode_box_autoadd_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
+  }
+
+  @protected
+  WorkspaceDef dco_decode_box_autoadd_workspace_def(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_workspace_def(raw);
   }
 
   @protected
@@ -2671,11 +3062,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CloneRequestDto dco_decode_clone_request_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return CloneRequestDto(
       source: dco_decode_clone_source_dto(arr[0]),
       destName: dco_decode_opt_String(arr[1]),
+      workspace: dco_decode_opt_String(arr[2]),
     );
   }
 
@@ -3021,6 +3413,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<MergedWorkspace> dco_decode_list_merged_workspace(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_merged_workspace).toList();
+  }
+
+  @protected
   List<OperationStatusDto> dco_decode_list_operation_status_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_operation_status_dto).toList();
@@ -3084,6 +3482,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<SessionInfo> dco_decode_list_session_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_session_info).toList();
+  }
+
+  @protected
+  List<WorkspaceDef> dco_decode_list_workspace_def(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_workspace_def).toList();
+  }
+
+  @protected
+  List<WorkspaceSourceDto> dco_decode_list_workspace_source_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_workspace_source_dto).toList();
+  }
+
+  @protected
+  MergedWorkspace dco_decode_merged_workspace(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return MergedWorkspace(
+      name: dco_decode_opt_String(arr[0]),
+      label: dco_decode_String(arr[1]),
+    );
   }
 
   @protected
@@ -3155,6 +3577,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MergedWorkspace? dco_decode_opt_box_autoadd_merged_workspace(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_merged_workspace(raw);
+  }
+
+  @protected
   ProjectId? dco_decode_opt_box_autoadd_project_id(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_project_id(raw);
@@ -3205,6 +3633,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  WorkspaceDef? dco_decode_opt_box_autoadd_workspace_def(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_workspace_def(raw);
+  }
+
+  @protected
   PrState dco_decode_pr_state(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return PrState.values[raw as int];
@@ -3250,8 +3684,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ProjectInfoDto dco_decode_project_info_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return ProjectInfoDto(
       id: dco_decode_project_id(arr[0]),
       name: dco_decode_String(arr[1]),
@@ -3259,6 +3693,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       mainBranch: dco_decode_String(arr[3]),
       sessionIds: dco_decode_list_session_id(arr[4]),
       originUrl: dco_decode_opt_String(arr[5]),
+      workspace: dco_decode_opt_String(arr[6]),
     );
   }
 
@@ -3504,6 +3939,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SetWorkspacesRequestDto dco_decode_set_workspaces_request_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return SetWorkspacesRequestDto(
+      workspaces: dco_decode_list_workspace_def(arr[0]),
+      main: dco_decode_opt_box_autoadd_workspace_def(arr[1]),
+      startupWorkspace: dco_decode_opt_String(arr[2]),
+    );
+  }
+
+  @protected
+  SnapshotDto dco_decode_snapshot_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    return SnapshotDto(
+      projects: dco_decode_list_project_info_dto(arr[0]),
+      sessions: dco_decode_list_session_info(arr[1]),
+      cascadePaused: dco_decode_opt_box_autoadd_session_id(arr[2]),
+      pendingCommentSessions: dco_decode_list_session_id(arr[3]),
+      projectPull: dco_decode_list_project_pull_dto(arr[4]),
+      operations: dco_decode_list_operation_status_dto(arr[5]),
+      server: dco_decode_server_status(arr[6]),
+      workspaces: dco_decode_list_workspace_def(arr[7]),
+      mainWorkspace: dco_decode_opt_box_autoadd_workspace_def(arr[8]),
+      startupWorkspace: dco_decode_String(arr[9]),
+    );
+  }
+
+  @protected
   TerminalEvent dco_decode_terminal_event(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -3553,19 +4021,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  WorkspaceSnapshotDto dco_decode_workspace_snapshot_dto(dynamic raw) {
+  WorkspaceDef dco_decode_workspace_def(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
-    return WorkspaceSnapshotDto(
-      projects: dco_decode_list_project_info_dto(arr[0]),
-      sessions: dco_decode_list_session_info(arr[1]),
-      cascadePaused: dco_decode_opt_box_autoadd_session_id(arr[2]),
-      pendingCommentSessions: dco_decode_list_session_id(arr[3]),
-      projectPull: dco_decode_list_project_pull_dto(arr[4]),
-      operations: dco_decode_list_operation_status_dto(arr[5]),
-      server: dco_decode_server_status(arr[6]),
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return WorkspaceDef(name: dco_decode_String(arr[0]));
+  }
+
+  @protected
+  WorkspaceSourceDto dco_decode_workspace_source_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return WorkspaceSourceDto(
+      defs: dco_decode_list_workspace_def(arr[0]),
+      main: dco_decode_opt_box_autoadd_workspace_def(arr[1]),
+      projectTags: dco_decode_list_String(arr[2]),
     );
   }
 
@@ -3728,6 +4201,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MergedWorkspace sse_decode_box_autoadd_merged_workspace(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_merged_workspace(deserializer));
+  }
+
+  @protected
   ProjectId sse_decode_box_autoadd_project_id(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_project_id(deserializer));
@@ -3788,9 +4269,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SetWorkspacesRequestDto sse_decode_box_autoadd_set_workspaces_request_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_set_workspaces_request_dto(deserializer));
+  }
+
+  @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_u_32(deserializer));
+  }
+
+  @protected
+  WorkspaceDef sse_decode_box_autoadd_workspace_def(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_workspace_def(deserializer));
   }
 
   @protected
@@ -3828,7 +4325,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_source = sse_decode_clone_source_dto(deserializer);
     var var_destName = sse_decode_opt_String(deserializer);
-    return CloneRequestDto(source: var_source, destName: var_destName);
+    var var_workspace = sse_decode_opt_String(deserializer);
+    return CloneRequestDto(
+      source: var_source,
+      destName: var_destName,
+      workspace: var_workspace,
+    );
   }
 
   @protected
@@ -4264,6 +4766,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<MergedWorkspace> sse_decode_list_merged_workspace(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <MergedWorkspace>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_merged_workspace(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<OperationStatusDto> sse_decode_list_operation_status_dto(
     SseDeserializer deserializer,
   ) {
@@ -4398,6 +4914,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<WorkspaceDef> sse_decode_list_workspace_def(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <WorkspaceDef>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_workspace_def(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<WorkspaceSourceDto> sse_decode_list_workspace_source_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <WorkspaceSourceDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_workspace_source_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  MergedWorkspace sse_decode_merged_workspace(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_name = sse_decode_opt_String(deserializer);
+    var var_label = sse_decode_String(deserializer);
+    return MergedWorkspace(name: var_name, label: var_label);
+  }
+
+  @protected
   OperationKind sse_decode_operation_kind(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
@@ -4496,6 +5048,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_i_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  MergedWorkspace? sse_decode_opt_box_autoadd_merged_workspace(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_merged_workspace(deserializer));
     } else {
       return null;
     }
@@ -4604,6 +5169,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  WorkspaceDef? sse_decode_opt_box_autoadd_workspace_def(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_workspace_def(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   PrState sse_decode_pr_state(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
@@ -4651,6 +5229,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_mainBranch = sse_decode_String(deserializer);
     var var_sessionIds = sse_decode_list_session_id(deserializer);
     var var_originUrl = sse_decode_opt_String(deserializer);
+    var var_workspace = sse_decode_opt_String(deserializer);
     return ProjectInfoDto(
       id: var_id,
       name: var_name,
@@ -4658,6 +5237,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       mainBranch: var_mainBranch,
       sessionIds: var_sessionIds,
       originUrl: var_originUrl,
+      workspace: var_workspace,
     );
   }
 
@@ -4953,6 +5533,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SetWorkspacesRequestDto sse_decode_set_workspaces_request_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_workspaces = sse_decode_list_workspace_def(deserializer);
+    var var_main = sse_decode_opt_box_autoadd_workspace_def(deserializer);
+    var var_startupWorkspace = sse_decode_opt_String(deserializer);
+    return SetWorkspacesRequestDto(
+      workspaces: var_workspaces,
+      main: var_main,
+      startupWorkspace: var_startupWorkspace,
+    );
+  }
+
+  @protected
+  SnapshotDto sse_decode_snapshot_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_projects = sse_decode_list_project_info_dto(deserializer);
+    var var_sessions = sse_decode_list_session_info(deserializer);
+    var var_cascadePaused = sse_decode_opt_box_autoadd_session_id(deserializer);
+    var var_pendingCommentSessions = sse_decode_list_session_id(deserializer);
+    var var_projectPull = sse_decode_list_project_pull_dto(deserializer);
+    var var_operations = sse_decode_list_operation_status_dto(deserializer);
+    var var_server = sse_decode_server_status(deserializer);
+    var var_workspaces = sse_decode_list_workspace_def(deserializer);
+    var var_mainWorkspace = sse_decode_opt_box_autoadd_workspace_def(
+      deserializer,
+    );
+    var var_startupWorkspace = sse_decode_String(deserializer);
+    return SnapshotDto(
+      projects: var_projects,
+      sessions: var_sessions,
+      cascadePaused: var_cascadePaused,
+      pendingCommentSessions: var_pendingCommentSessions,
+      projectPull: var_projectPull,
+      operations: var_operations,
+      server: var_server,
+      workspaces: var_workspaces,
+      mainWorkspace: var_mainWorkspace,
+      startupWorkspace: var_startupWorkspace,
+    );
+  }
+
+  @protected
   TerminalEvent sse_decode_terminal_event(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_kind = sse_decode_terminal_event_kind(deserializer);
@@ -5000,25 +5624,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  WorkspaceSnapshotDto sse_decode_workspace_snapshot_dto(
+  WorkspaceDef sse_decode_workspace_def(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_name = sse_decode_String(deserializer);
+    return WorkspaceDef(name: var_name);
+  }
+
+  @protected
+  WorkspaceSourceDto sse_decode_workspace_source_dto(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_projects = sse_decode_list_project_info_dto(deserializer);
-    var var_sessions = sse_decode_list_session_info(deserializer);
-    var var_cascadePaused = sse_decode_opt_box_autoadd_session_id(deserializer);
-    var var_pendingCommentSessions = sse_decode_list_session_id(deserializer);
-    var var_projectPull = sse_decode_list_project_pull_dto(deserializer);
-    var var_operations = sse_decode_list_operation_status_dto(deserializer);
-    var var_server = sse_decode_server_status(deserializer);
-    return WorkspaceSnapshotDto(
-      projects: var_projects,
-      sessions: var_sessions,
-      cascadePaused: var_cascadePaused,
-      pendingCommentSessions: var_pendingCommentSessions,
-      projectPull: var_projectPull,
-      operations: var_operations,
-      server: var_server,
+    var var_defs = sse_decode_list_workspace_def(deserializer);
+    var var_main = sse_decode_opt_box_autoadd_workspace_def(deserializer);
+    var var_projectTags = sse_decode_list_String(deserializer);
+    return WorkspaceSourceDto(
+      defs: var_defs,
+      main: var_main,
+      projectTags: var_projectTags,
     );
   }
 
@@ -5211,6 +5834,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_merged_workspace(
+    MergedWorkspace self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_merged_workspace(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_project_id(
     ProjectId self,
     SseSerializer serializer,
@@ -5283,9 +5915,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_set_workspaces_request_dto(
+    SetWorkspacesRequestDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_set_workspaces_request_dto(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_32(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_workspace_def(
+    WorkspaceDef self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_workspace_def(self, serializer);
   }
 
   @protected
@@ -5318,6 +5968,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_clone_source_dto(self.source, serializer);
     sse_encode_opt_String(self.destName, serializer);
+    sse_encode_opt_String(self.workspace, serializer);
   }
 
   @protected
@@ -5672,6 +6323,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_merged_workspace(
+    List<MergedWorkspace> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_merged_workspace(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_operation_status_dto(
     List<OperationStatusDto> self,
     SseSerializer serializer,
@@ -5802,6 +6465,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_workspace_def(
+    List<WorkspaceDef> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_workspace_def(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_workspace_source_dto(
+    List<WorkspaceSourceDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_workspace_source_dto(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_merged_workspace(
+    MergedWorkspace self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.name, serializer);
+    sse_encode_String(self.label, serializer);
+  }
+
+  @protected
   void sse_encode_operation_kind(OperationKind self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
@@ -5894,6 +6591,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_i_32(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_merged_workspace(
+    MergedWorkspace? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_merged_workspace(self, serializer);
     }
   }
 
@@ -5999,6 +6709,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_workspace_def(
+    WorkspaceDef? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_workspace_def(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_pr_state(PrState self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
@@ -6042,6 +6765,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.mainBranch, serializer);
     sse_encode_list_session_id(self.sessionIds, serializer);
     sse_encode_opt_String(self.originUrl, serializer);
+    sse_encode_opt_String(self.workspace, serializer);
   }
 
   @protected
@@ -6282,6 +7006,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_set_workspaces_request_dto(
+    SetWorkspacesRequestDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_workspace_def(self.workspaces, serializer);
+    sse_encode_opt_box_autoadd_workspace_def(self.main, serializer);
+    sse_encode_opt_String(self.startupWorkspace, serializer);
+  }
+
+  @protected
+  void sse_encode_snapshot_dto(SnapshotDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_project_info_dto(self.projects, serializer);
+    sse_encode_list_session_info(self.sessions, serializer);
+    sse_encode_opt_box_autoadd_session_id(self.cascadePaused, serializer);
+    sse_encode_list_session_id(self.pendingCommentSessions, serializer);
+    sse_encode_list_project_pull_dto(self.projectPull, serializer);
+    sse_encode_list_operation_status_dto(self.operations, serializer);
+    sse_encode_server_status(self.server, serializer);
+    sse_encode_list_workspace_def(self.workspaces, serializer);
+    sse_encode_opt_box_autoadd_workspace_def(self.mainWorkspace, serializer);
+    sse_encode_String(self.startupWorkspace, serializer);
+  }
+
+  @protected
   void sse_encode_terminal_event(TerminalEvent self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_terminal_event_kind(self.kind, serializer);
@@ -6328,17 +7078,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_workspace_snapshot_dto(
-    WorkspaceSnapshotDto self,
+  void sse_encode_workspace_def(WorkspaceDef self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.name, serializer);
+  }
+
+  @protected
+  void sse_encode_workspace_source_dto(
+    WorkspaceSourceDto self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_list_project_info_dto(self.projects, serializer);
-    sse_encode_list_session_info(self.sessions, serializer);
-    sse_encode_opt_box_autoadd_session_id(self.cascadePaused, serializer);
-    sse_encode_list_session_id(self.pendingCommentSessions, serializer);
-    sse_encode_list_project_pull_dto(self.projectPull, serializer);
-    sse_encode_list_operation_status_dto(self.operations, serializer);
-    sse_encode_server_status(self.server, serializer);
+    sse_encode_list_workspace_def(self.defs, serializer);
+    sse_encode_opt_box_autoadd_workspace_def(self.main, serializer);
+    sse_encode_list_String(self.projectTags, serializer);
   }
 }

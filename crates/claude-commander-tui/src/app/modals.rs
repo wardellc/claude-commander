@@ -295,6 +295,17 @@ impl App {
             _ => None,
         };
 
+        // Fit an open colour picker's grid to the pane it is about to be drawn
+        // in, so the rows drawn and the rows `j`/`k` step through agree —
+        // including after a resize.
+        if let Modal::Settings(SettingsState {
+            editing: Some(SettingsEditing::Colour { picker }),
+            ..
+        }) = &mut self.ui_state.modal
+        {
+            picker.fit_to_width(super::settings::colour_picker_width(area));
+        }
+
         match &self.ui_state.modal {
             Modal::None => {}
 
@@ -812,6 +823,36 @@ impl App {
             ">",
             width = key_col_width,
         )));
+        lines.push(Line::from(format!(
+            "  {:<width$}The palette searches every workspace: the active one's",
+            "workspaces",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}sessions rank first, others are tagged with their",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}workspace, and picking one switches workspace first.",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Each workspace can have its own theme, worn while it",
+            "themes",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}is active: edit it in Settings → Theme (\"Theme for\"),",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}or Enter on its Theme row in Settings → Workspaces.",
+            "",
+            width = key_col_width,
+        )));
 
         // Clone picker (in-modal keys, not bindable actions). The command
         // itself is listed under Projects above; these are the picker's own.
@@ -872,6 +913,36 @@ impl App {
             width = key_col_width,
         )));
 
+        // Embedded server (ambient fact, not a keybinding — same category as
+        // the global voice hotkey above).
+        lines.push(Line::from(""));
+        lines.push(Line::from("Embedded Server:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Run the HTTP API in this process so clients can reach",
+            "--serve",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}this machine; set `[server] auto_start` to make it the",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}default. Settings > Server edits bind/port/token.",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Use the palette's \"Copy server token\" to pair a",
+            "palette",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}client; the URL is shown in the status bar.",
+            "",
+            width = key_col_width,
+        )));
+
         // Mouse (the status/review bars surface primary actions as buttons).
         lines.push(Line::from(""));
         lines.push(Line::from("Mouse:"));
@@ -928,6 +999,11 @@ impl App {
             Span::raw("  "),
             Span::styled("○", Style::default().fg(self.theme.status_stopped)),
             Span::raw("  Stopped"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("\u{21c5}", Style::default().fg(self.theme.status_running)),
+            Span::raw("  HTTP API served from this process, on that port"),
         ]));
 
         // PR badges legend
@@ -1201,6 +1277,8 @@ impl App {
             PaletteMode::RemoteServerPicker => " Remove Remote Server ",
             PaletteMode::ProgramPicker { .. } => " Change Program ",
             PaletteMode::BasePicker { .. } => " Set Session Base ",
+            PaletteMode::WorkspacePicker => " Switch Workspace — or type a new name ",
+            PaletteMode::MoveProjectPicker { .. } => " Move Project to Workspace ",
             // The fetch state lives in the title (as the Checkout modal
             // does with "fetching origin…") so a slow or failed provider
             // listing is visible rather than reading as an empty account.
@@ -1310,6 +1388,16 @@ impl App {
                         format!(" ({})", m.project_name),
                         Style::default().fg(self.theme.text_secondary),
                     ));
+                    // A session outside the active workspace: tag it, dimly —
+                    // picking it switches workspace first.
+                    if let Some(workspace) = &m.other_workspace {
+                        spans.push(Span::styled(
+                            format!(" \u{00b7} {workspace}"),
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::DIM),
+                        ));
+                    }
                     frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
                 }
                 QuickSwitchItem::Command(entry) => {
@@ -1361,7 +1449,9 @@ impl App {
                 | QuickSwitchItem::RemoteServerRemove { label, .. }
                 | QuickSwitchItem::HostedRepository { label, .. }
                 | QuickSwitchItem::BaseChange { label, .. }
-                | QuickSwitchItem::ProgramChange { label, .. } => {
+                | QuickSwitchItem::ProgramChange { label, .. }
+                | QuickSwitchItem::Workspace { label, .. }
+                | QuickSwitchItem::ProjectWorkspace { label, .. } => {
                     let style = if is_selected {
                         self.theme.selection()
                     } else {

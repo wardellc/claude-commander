@@ -9,13 +9,15 @@
 # Three groups of things live here:
 #
 #   * Pure name/value helpers (cc_crate_for_alias, cc_exit_code_for_lane,
-#     cc_lanes_for_tier, cc_android_package_id, cc_apk_path,
+#     cc_lanes_for_tier, cc_missing_words, cc_android_package_id, cc_apk_path,
 #     cc_flutter_build_args). These are what scripts/tests/run.sh asserts on.
 #   * Toolchain entry (cc_run_in_shell), which reproduces the rule already used
 #     by client/tool/dart-format.sh: use the tool on PATH if it is there,
 #     otherwise re-enter the nix dev shell that provides it.
 #   * The lane runner (cc_lane, cc_print_summary), which gives verify.sh its
 #     run-everything / distinct-exit-code behaviour.
+#   * The git signing poison (cc_poisoned_gitconfig), which verify.sh runs every
+#     lane under so a test fixture that would sign a commit fails loudly.
 
 # ---------------------------------------------------------------------------
 # Paths and reserved exit codes
@@ -64,6 +66,11 @@ if [ -z "${CC_CLIENT_SHELL:-}" ]; then
   esac
 fi
 CC_ANDROID_SHELL="${CC_ANDROID_SHELL:-.#client}"
+# Dev shell providing node/npm/biome and nixpkgs' Playwright browsers for web/.
+# Anchored at the repo root rather than `.#web` because web/e2e/run.sh sources
+# this file and re-enters the shell from wherever it was invoked, not from a cwd
+# it has already moved to the root.
+CC_WEB_SHELL="${CC_WEB_SHELL:-$CC_REPO_ROOT#web}"
 
 # ---------------------------------------------------------------------------
 # Output
@@ -134,7 +141,7 @@ cc_exit_code_for_lane() {
     clippy) printf '11\n' ;;
     build) printf '12\n' ;;
     test) printf '13\n' ;;
-    # Client lanes: 20-29
+    # Client lanes: 20-29 (Flutter 20-26, web 27-28)
     pub-get) printf '20\n' ;;
     dart-format) printf '21\n' ;;
     analyze) printf '22\n' ;;
@@ -142,6 +149,8 @@ cc_exit_code_for_lane() {
     cdylib) printf '24\n' ;;
     e2e) printf '25\n' ;;
     goldens) printf '26\n' ;;
+    web) printf '27\n' ;;
+    web-e2e) printf '28\n' ;;
     # Whole-repo lanes: 30-39
     nix-build) printf '30\n' ;;
     packaging) printf '31\n' ;;
@@ -166,13 +175,15 @@ cc_lane_description() {
     dart-format) printf 'client/tool/dart-format.sh --check\n' ;;
     analyze) printf 'flutter analyze lib test integration_test\n' ;;
     flutter-test) printf 'flutter test (client widget + golden tests)\n' ;;
-    cdylib) printf 'cargo test in client/rust\n' ;;
+    cdylib) printf 'cargo test --locked in client/rust\n' ;;
     e2e) printf 'client/tool/e2e.sh (hermetic server + Linux app)\n' ;;
     goldens) printf 'flutter test test/goldens (reference images only)\n' ;;
+    web) printf 'web/: npm ci, check, typecheck, test, build is fresh; protocol TS drift + ts clippy\n' ;;
+    web-e2e) printf 'web/e2e/run.sh (hermetic server + headless Playwright)\n' ;;
     nix-build) printf 'nix build\n' ;;
     nix-src-filter) printf 'scripts/check-nix-src-filter.sh (flake src filter guard)\n' ;;
     packaging) printf 'cargo install --path crates/claude-commander (Homebrew path)\n' ;;
-    shellcheck) printf 'shellcheck -x over scripts/, client/tool/, docs/tool/\n' ;;
+    shellcheck) printf 'shellcheck -x over scripts/, client/tool/, docs/tool/, web/e2e/\n' ;;
     selftest) printf 'scripts/tests/run.sh\n' ;;
     *)
       cc_error "unknown lane '${1:-}'"
@@ -194,7 +205,7 @@ cc_lane_description() {
 # is how the goldens lane was silently skipped when the runner walked the `all`
 # tier instead.
 cc_lane_run_order() {
-  printf 'fmt clippy build test pub-get dart-format analyze flutter-test goldens cdylib shellcheck selftest nix-src-filter e2e nix-build packaging\n'
+  printf 'fmt clippy build test pub-get dart-format analyze flutter-test goldens cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging\n'
 }
 
 cc_lanes_for_tier() {
@@ -206,14 +217,38 @@ cc_lanes_for_tier() {
     # NOT in the client or all tiers: `flutter test` already runs the goldens, so
     # including it there would rasterise every reference image twice.
     goldens) printf 'pub-get goldens\n' ;;
+    # The browser UI under web/. Needs no Flutter and no display (Playwright runs
+    # headless), which is why CI can run web-e2e when it cannot run e2e.
+    web) printf 'web web-e2e\n' ;;
     all)
-      printf 'fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter e2e nix-build packaging\n'
+      printf 'fmt clippy build test pub-get dart-format analyze flutter-test cdylib shellcheck selftest nix-src-filter web e2e web-e2e nix-build packaging\n'
       ;;
     *)
-      cc_error "unknown tier '${1:-}' (try: fast rust client goldens all)"
+      cc_error "unknown tier '${1:-}' (try: fast rust client goldens web all)"
       return 1
       ;;
   esac
+}
+
+# The npm scripts verify.sh's web lane runs, i.e. web/package.json's contract
+# with it, and the committed build output that `npm run build` must reproduce.
+readonly CC_WEB_NPM_SCRIPTS="check typecheck test build"
+readonly CC_WEBUI_DIR="crates/claude-commander-server/webui"
+
+# cc_missing_words <present> <required...> -- the required words absent from
+# the space-separated <present> list, space separated; empty when none are.
+#
+# Whole-word, so a `build:watch` script does not satisfy a missing `build`.
+cc_missing_words() {
+  local present=" ${1:-} " out="" word
+  shift
+  for word in "$@"; do
+    case "$present" in
+      *" $word "*) ;;
+      *) out+="${out:+ }$word" ;;
+    esac
+  done
+  printf '%s\n' "$out"
 }
 
 # cc_android_package_id <gradle_kts_file> -- the app's applicationId.
@@ -257,6 +292,19 @@ cc_first_pid() {
     "" | *[!0-9]*) printf '\n' ;;
     *) printf '%s\n' "$raw" ;;
   esac
+}
+
+# cc_kill_process_groups PID... -- SIGTERM each process group led by PID (a
+# helper started under `setsid`, so killing the group reaches everything it
+# spawned). Empty arguments -- a helper that was never started -- are skipped,
+# and a group that has already exited is not an error, so this is safe to call
+# from an EXIT trap under `set -u` on any exit path, more than once.
+cc_kill_process_groups() {
+  local pid
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  done
 }
 
 # cc_apk_path <debug|release> -- APK path relative to client/.
@@ -405,6 +453,69 @@ cc_usage_from_header() {
 # cc_have_display -- true when a GUI target can actually open a window.
 cc_have_display() {
   [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]
+}
+
+# ---------------------------------------------------------------------------
+# Git signing poison
+# ---------------------------------------------------------------------------
+
+# cc_poisoned_gitconfig -- print a global git config under which any attempt to
+# sign a commit or an annotated tag fails at once.
+#
+# Test fixtures commit into temp repos. Left to inherit the developer's global
+# config, a `commit.gpgsign=true` routed through 1Password's op-ssh-sign makes
+# each of them hang for about a minute and then fail whenever the vault is
+# locked -- and pass whenever it is not, so the dependency never shows up on the
+# machine that introduced it. Signing is switched on here and the signer is
+# `false`, so a fixture that forgets the opt-out (core's `git::fixture` helpers,
+# test-support's `harness_git`, or `commit.gpgsign false` in the temp repo's own
+# config) fails immediately and
+# every time.
+#
+# A *global* file rather than GIT_CONFIG_COUNT on purpose: env config outranks a
+# repo's local config, and a test that drives production code which commits (it
+# cannot add `-c` to a command it does not build) opts out through exactly that
+# local config -- which is also what beats a real developer's global file. Using
+# the global slot also drops the rest of the developer's global config for the
+# run, which is the state CI's runners are in anyway.
+cc_poisoned_gitconfig() {
+  printf '%s\n' \
+    '# Written by scripts/lib/dev-common.sh (cc_poisoned_gitconfig).' \
+    '[commit]' '	gpgsign = true' \
+    '[tag]' '	gpgsign = true' \
+    '[gpg]' '	format = ssh' \
+    '[gpg "ssh"]' '	program = false'
+}
+
+# cc_export_poisoned_git_signing <file> -- write cc_poisoned_gitconfig to <file>
+# and point GIT_CONFIG_GLOBAL at it for the rest of this process and its children
+# (it survives `nix develop -c`, like DO_NOT_TRACK).
+cc_export_poisoned_git_signing() {
+  local file="$1"
+  mkdir -p "$(dirname "$file")"
+  cc_poisoned_gitconfig >"$file"
+  export GIT_CONFIG_GLOBAL="$file"
+}
+
+# ---------------------------------------------------------------------------
+# Feature leak guard
+# ---------------------------------------------------------------------------
+
+# The `cargo tree` invocation whose output cc_tree_leaks_test_support reads: who
+# enables which of core's features over *normal* and *build* edges only, i.e.
+# what a `cargo build --workspace` of the binaries compiles. Dev edges (the TUI's
+# and core's own `test-support` dev-dependencies) are excluded, as they should be.
+CC_CORE_FEATURE_TREE_CMD="cargo tree --offline --workspace -e normal,build,features -i claude-commander-core"
+
+# cc_tree_leaks_test_support -- read CC_CORE_FEATURE_TREE_CMD's output on stdin
+# and succeed when it shows core's `test-support` feature enabled.
+#
+# That feature switches telemetry off (`telemetry::would_be_enabled`) and compiles
+# `MockBackend` in, so it must only ever arrive through a `[dev-dependencies]`
+# entry. A normal-dependency edge to it -- e.g. from `claude-commander-test-support`,
+# which is itself a normal crate -- unifies it into every workspace build.
+cc_tree_leaks_test_support() {
+  grep -q 'claude-commander-core feature "test-support"'
 }
 
 # ---------------------------------------------------------------------------

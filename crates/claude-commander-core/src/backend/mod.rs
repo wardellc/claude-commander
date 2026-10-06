@@ -50,12 +50,13 @@ use uuid::Uuid;
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, ServerStatus,
-    SessionDetail, SetSessionBaseOutcome, WorkspaceSnapshot,
+    SessionDetail, SetSessionBaseOutcome, Snapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::hosting::RepositoryListing;
+use claude_commander_protocol::workspace::SetWorkspacesRequest;
 
 pub use error::{BResult, BackendError};
 pub use local::LocalBackend;
@@ -219,7 +220,7 @@ pub use claude_commander_protocol::connection::ConnectionState;
 /// synchronously (no `.await` on the hot path).
 #[derive(Debug, Clone)]
 pub struct BackendView {
-    pub snapshot: WorkspaceSnapshot,
+    pub snapshot: Snapshot,
     pub agent_states: AgentStatesSnapshot,
     pub connection: ConnectionState,
 }
@@ -239,13 +240,13 @@ impl BackendView {
     }
 }
 
-/// An empty [`WorkspaceSnapshot`] placeholder (no projects/sessions). Used to
+/// An empty [`Snapshot`] placeholder (no projects/sessions). Used to
 /// seed a [`BackendView`] before its first real snapshot lands (and by tests to
 /// stand up a `mock::MockBackend` — plain text, since that module only exists
 /// under `cfg(test)` or the `test-support` feature, so a link to it would be
 /// unresolvable in a normal doc build).
-pub fn empty_snapshot() -> WorkspaceSnapshot {
-    WorkspaceSnapshot {
+pub fn empty_snapshot() -> Snapshot {
+    Snapshot {
         projects: Vec::new(),
         sessions: Vec::new(),
         cascade_paused: None,
@@ -264,6 +265,9 @@ pub fn empty_snapshot() -> WorkspaceSnapshot {
             // during "connecting…".
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
+        workspaces: Vec::new(),
+        main_workspace: None,
+        startup_workspace: Default::default(),
     }
 }
 
@@ -325,6 +329,12 @@ pub fn server_version_mismatch(server: &str, client: &str) -> Option<VersionMism
 /// rather than leaking a task that would poll a server forever (the task holds
 /// its own `Arc` to the backend, so dropping the handle alone wouldn't stop it).
 pub struct BackendHandle {
+    /// Refresh request order, shared by change feeds and explicit refreshes.
+    pub refresh_sequence: Arc<std::sync::atomic::AtomicU64>,
+    /// Latest refresh folded into the cached view.
+    pub view_revision: u64,
+    /// Latest agent-state refresh; state-only reads must not discard snapshots.
+    pub agent_states_revision: u64,
     pub id: BackendId,
     pub backend: Arc<dyn CommanderBackend>,
     pub view: BackendView,
@@ -340,6 +350,9 @@ impl BackendHandle {
             id,
             backend,
             view: BackendView::connecting(),
+            refresh_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            view_revision: 0,
+            agent_states_revision: 0,
             feed_tasks: Vec::new(),
         }
     }
@@ -562,7 +575,7 @@ pub trait CommanderBackend: Send + Sync {
 
     // -- Queries --
 
-    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot>;
+    async fn snapshot(&self) -> BResult<Snapshot>;
 
     /// Bulk agent-state snapshot for active sessions. `fresh` bypasses any TTL
     /// cache and forces a re-capture.
@@ -578,6 +591,13 @@ pub trait CommanderBackend: Send + Sync {
 
     /// Preview payload for a session or project (agent pane, diff, shell pane).
     async fn preview(&self, target: PreviewTarget) -> BResult<PreviewData>;
+    async fn preview_part(
+        &self,
+        target: PreviewTarget,
+        _part: claude_commander_protocol::preview::PreviewPart,
+    ) -> BResult<PreviewData> {
+        self.preview(target).await
+    }
 
     /// The full branch diff (committed vs origin/main plus uncommitted changes)
     /// used for the AI summary.
@@ -672,7 +692,13 @@ pub trait CommanderBackend: Send + Sync {
 
     // -- Projects --
 
-    async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+    /// Register `path` as a project, tagged with `workspace` (`None` = Main) —
+    /// frontends pass their active workspace so a new project lands in it.
+    async fn add_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId>;
 
     /// Register `path` as a project, or answer with the id of the project already
     /// registered for it.
@@ -686,10 +712,46 @@ pub trait CommanderBackend: Send + Sync {
     /// No default: the dedupe belongs where the projects live, so a backend has to
     /// route it to its own host rather than inherit an answer composed from a
     /// snapshot a frontend happens to hold.
-    async fn ensure_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+    ///
+    /// `workspace` tags the project only if this call registers it; an existing
+    /// project keeps its workspace.
+    async fn ensure_project(
+        &self,
+        path: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<ProjectId>;
 
     async fn remove_project(&self, id: ProjectId) -> BResult<()>;
-    async fn scan_directory(&self, dir: std::path::PathBuf) -> BResult<crate::session::ScanResult>;
+
+    // -- Workspaces --
+    //
+    // No defaults: a workspace edit is sent eagerly to every connected backend,
+    // and each must say for itself whether it landed (a frontend toasts the
+    // ones that failed). Rename and delete are idempotent on a backend that
+    // never had the workspace, so that propagation is safe to repeat.
+
+    /// Replace this backend's workspace definitions (and, when set, Main's
+    /// label/colour and the startup choice). Never re-tags projects.
+    async fn set_workspaces(&self, req: SetWorkspacesRequest) -> BResult<()>;
+
+    /// Rename a workspace, rewriting every project tagged with it. A no-op
+    /// success when this backend has no such workspace.
+    async fn rename_workspace(&self, from: String, to: String) -> BResult<()>;
+
+    /// Delete a workspace, moving its projects to Main. A no-op success when
+    /// this backend has no such workspace.
+    async fn delete_workspace(&self, name: String) -> BResult<()>;
+
+    /// Move a project into `workspace` (`None` = Main), defining the workspace
+    /// on this backend if it is new here.
+    async fn set_project_workspace(&self, id: ProjectId, workspace: Option<String>) -> BResult<()>;
+    /// Scan `dir` for git repositories and register them, each new one tagged
+    /// with `workspace` (`None` = Main).
+    async fn scan_directory(
+        &self,
+        dir: std::path::PathBuf,
+        workspace: Option<String>,
+    ) -> BResult<crate::session::ScanResult>;
 
     // -- Repository clone --
     //
@@ -914,6 +976,7 @@ mod tests {
                 full_name: "octo/widget".to_string(),
             },
             dest_name: None,
+            workspace: None,
         };
         let job = backend.start_clone(req.clone()).await.unwrap();
         assert!(
@@ -956,6 +1019,7 @@ mod tests {
                     full_name: "octo/widget".to_string()
                 },
                 dest_name: None,
+                workspace: None,
             })
             .await
             .unwrap_err(),

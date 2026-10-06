@@ -156,54 +156,113 @@ fn list_row_at(
     (idx < item_count).then_some(idx)
 }
 
-/// Which filterable modal needs its filter recomputed after a paste.
+/// Which filterable modal needs its filter recomputed after text lands in it (a paste or a dictation).
 /// Used to defer the `&mut self` refilter call until after the
 /// `&mut self.ui_state.modal` borrow has been released.
 #[derive(Debug, PartialEq, Eq)]
-enum PasteRefilter {
+enum Refilter {
     CheckoutBranch,
     QuickSwitch,
 }
 
-/// Append clipboard text to the open modal's input field. Newlines are
-/// stripped so a multi-line paste doesn't accidentally submit. Returns
-/// `Some(PasteRefilter::…)` when the caller still needs to recompute a
-/// filtered list via an `&mut self` helper; `None` when handling is
-/// complete (or the modal has no text field).
-fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> {
-    let clean = text.replace(['\n', '\r'], "");
-    match modal {
-        Modal::Input { value, .. } => {
-            super::insert_into_input(value, &clean);
-            None
-        }
+/// The open modal's live text field: where a paste or a dictated transcript
+/// lands. One match ([`text_field`]) decides which modals have one, so paste
+/// and dictation cannot drift apart on it.
+enum TextField<'a> {
+    /// A single-line field with nothing to recompute afterwards.
+    Line(&'a mut Input),
+    /// A single-line query whose filtered list the caller recomputes.
+    Query(&'a mut Input, Refilter),
+    /// The path field, which owns its completer and refilters inline.
+    Path {
+        value: &'a mut Input,
+        completer: &'a mut PathCompleter,
+        scroll: &'a mut usize,
+    },
+    /// The review view's open comment draft.
+    Draft(&'a mut DiffReviewState),
+    /// Settings → Theme: a colour picker, whose text is a hex colour.
+    Colour(&'a mut colour_picker::ColourPicker),
+}
+
+/// The open modal's text field, or `None` when it has none. The review view
+/// only has one while a comment draft is open.
+fn text_field(modal: &mut Modal) -> Option<TextField<'_>> {
+    Some(match modal {
+        Modal::Input { value, .. } => TextField::Line(value),
+        Modal::Conversation { input, .. } => TextField::Line(input),
         Modal::PathInput {
             value,
             completer,
             scroll,
             ..
-        } => {
-            super::insert_into_input(value, &clean);
-            completer.refilter(value.value());
-            *scroll = 0;
-            None
-        }
-        Modal::CheckoutBranch { query, .. } => {
-            super::insert_into_input(query, &clean);
-            Some(PasteRefilter::CheckoutBranch)
-        }
-        Modal::QuickSwitch { query, .. } => {
-            super::insert_into_input(query, &clean);
-            Some(PasteRefilter::QuickSwitch)
-        }
-        // The comment draft is multi-line capable, so it gets the raw text
-        // (newline handling lives in `paste_into_draft`), not `clean`.
-        Modal::ReviewDiff(state) => {
-            state.paste_into_draft(text);
-            None
-        }
-        _ => None,
+        } => TextField::Path {
+            value,
+            completer,
+            scroll,
+        },
+        Modal::CheckoutBranch { query, .. } => TextField::Query(query, Refilter::CheckoutBranch),
+        Modal::QuickSwitch { query, .. } => TextField::Query(query, Refilter::QuickSwitch),
+        Modal::ReviewDiff(state) if state.comment.is_some() => TextField::Draft(state),
+        // A paste over a colour picker is a hex colour, wherever the picker's
+        // focus is.
+        Modal::Settings(SettingsState {
+            editing: Some(super::SettingsEditing::Colour { picker }),
+            ..
+        }) => TextField::Colour(picker),
+        _ => return None,
+    })
+}
+
+/// The open modal's text field if dictation may type into it. Narrower than
+/// [`text_field`] in two places: a masked field holds a secret, which is not
+/// something to read aloud to a transcription server (nor could the user see
+/// what was heard), and a colour picker takes hex, which nobody speaks.
+fn dictation_field(modal: &mut Modal) -> Option<TextField<'_>> {
+    if matches!(modal, Modal::Input { mask: true, .. }) {
+        return None;
     }
+    text_field(modal).filter(|f| !matches!(f, TextField::Colour(_)))
+}
+
+impl TextField<'_> {
+    /// Insert `text` at the cursor. Newlines are stripped for every
+    /// single-line field so a multi-line paste doesn't accidentally submit;
+    /// the comment draft is multi-line capable and gets the raw text (newline
+    /// handling lives in `paste_into_draft`). Returns the refilter the caller
+    /// still owes, if any.
+    fn insert(self, text: &str) -> Option<Refilter> {
+        let clean = || text.replace(['\n', '\r'], "");
+        match self {
+            TextField::Line(value) => super::insert_into_input(value, &clean()),
+            TextField::Query(query, refilter) => {
+                super::insert_into_input(query, &clean());
+                return Some(refilter);
+            }
+            TextField::Path {
+                value,
+                completer,
+                scroll,
+            } => {
+                super::insert_into_input(value, &clean());
+                completer.refilter(value.value());
+                *scroll = 0;
+            }
+            TextField::Draft(state) => {
+                state.paste_into_draft(text);
+            }
+            TextField::Colour(picker) => picker.paste(&clean()),
+        }
+        None
+    }
+}
+
+/// Append clipboard text to the open modal's text field (see [`TextField`]).
+/// Returns `Some(Refilter::…)` when the caller still needs to recompute a
+/// filtered list via an `&mut self` helper; `None` when handling is complete
+/// (or the modal has no text field).
+fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<Refilter> {
+    text_field(modal)?.insert(text)
 }
 
 /// Whether `key` should open the quick-switch palette: the configured leader
@@ -496,13 +555,21 @@ impl App {
                     return;
                 }
 
-                // Voice input (Alt-V) is intercepted before modal routing so it
-                // works whether the conversation overlay (or any modal) is open
-                // or not — mirroring how spoken replies play regardless of UI
-                // state. Its Alt modifier means it never shadows text entry.
-                if self.config.keybindings.resolve(&key) == Some(BindableAction::ToggleVoiceInput) {
-                    self.toggle_voice_input().await;
-                    return;
+                // The two voice toggles (Alt-V, Alt-T) are intercepted before
+                // modal routing so they work whether the conversation overlay
+                // (or any modal) is open or not — mirroring how spoken replies
+                // play regardless of UI state. Their Alt modifier means they
+                // never shadow text entry, including a modal's input field.
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::ToggleVoiceInput) => {
+                        self.toggle_voice_input().await;
+                        return;
+                    }
+                    Some(BindableAction::ToggleDictation) => {
+                        self.toggle_dictation().await;
+                        return;
+                    }
+                    _ => {}
                 }
 
                 // Check for modal-specific handling first
@@ -570,8 +637,18 @@ impl App {
                     }
                 }
             }
-            InputEvent::Resize(_, _) => {
-                // Terminal will re-render automatically
+            InputEvent::Resize(width, height) => {
+                // The terminal re-renders on its own, but an open colour
+                // picker's row width must follow now: a key queued behind the
+                // resize would otherwise step by the old one.
+                let area = Rect::new(0, 0, width, height);
+                if let Modal::Settings(SettingsState {
+                    editing: Some(super::SettingsEditing::Colour { picker }),
+                    ..
+                }) = &mut self.ui_state.modal
+                {
+                    picker.fit_to_width(super::settings::colour_picker_width(area));
+                }
             }
             InputEvent::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -725,13 +802,39 @@ impl App {
                 // A paste refilters the list, so drop any pending first-click.
                 self.ui_state.modal_list_last_click = None;
                 // Handle paste in modal input, ignore otherwise
-                match apply_paste_to_modal(&mut self.ui_state.modal, &text) {
-                    Some(PasteRefilter::CheckoutBranch) => self.refilter_checkout_branches(),
-                    Some(PasteRefilter::QuickSwitch) => self.refilter_quick_switch(),
-                    None => {}
-                }
+                let refilter = apply_paste_to_modal(&mut self.ui_state.modal, &text);
+                self.finish_text_insert(refilter);
             }
         }
+    }
+
+    /// Run the refilter a [`TextField::insert`] left to the caller.
+    fn finish_text_insert(&mut self, refilter: Option<Refilter>) {
+        match refilter {
+            Some(Refilter::CheckoutBranch) => self.refilter_checkout_branches(),
+            Some(Refilter::QuickSwitch) => self.refilter_quick_switch(),
+            None => {}
+        }
+    }
+
+    /// Whether the open modal has a text field dictation may type into.
+    pub(super) fn modal_accepts_dictation(&mut self) -> bool {
+        dictation_field(&mut self.ui_state.modal).is_some()
+    }
+
+    /// Type a dictated transcript into the open modal's text field, exactly as
+    /// a paste would land. Returns `false` (and changes nothing) when there is
+    /// no such field — the modal closed, or changed, while the user spoke.
+    pub(super) fn dictate_into_modal(&mut self, text: &str) -> bool {
+        let Some(field) = dictation_field(&mut self.ui_state.modal) else {
+            return false;
+        };
+        let refilter = field.insert(text);
+        // The insert can refilter a list, so a pending first-click no longer
+        // points at a meaningful row — the same reset a paste does.
+        self.ui_state.modal_list_last_click = None;
+        self.finish_text_insert(refilter);
+        true
     }
 
     /// Handle modal key input
@@ -1336,7 +1439,7 @@ impl App {
         // Clone the selected item so the borrow on `matches` is released
         // before we mutate `modal` and dispatch. `unmatched` carries the typed
         // query for the one mode that can act without a highlighted row.
-        let (selected, unmatched) = match &self.ui_state.modal {
+        let (mode, selected, unmatched) = match &self.ui_state.modal {
             Modal::QuickSwitch {
                 mode,
                 query,
@@ -1344,13 +1447,20 @@ impl App {
                 selected_idx,
                 ..
             } => (
+                *mode,
                 matches.get(*selected_idx).cloned(),
                 // The repo picker's "clone something not in the list" path: with
                 // no row matching, the query itself is the clone source. Mirrors
                 // the checkout modal, where an unmatched query is used as-is.
-                (*mode == PaletteMode::RepositoryPicker)
-                    .then(|| query.value().trim().to_string())
-                    .filter(|q| !q.is_empty()),
+                // The workspace pickers use it the same way, as a new name.
+                matches!(
+                    mode,
+                    PaletteMode::RepositoryPicker
+                        | PaletteMode::WorkspacePicker
+                        | PaletteMode::MoveProjectPicker { .. }
+                )
+                .then(|| query.value().trim().to_string())
+                .filter(|q| !q.is_empty()),
             ),
             _ => return,
         };
@@ -1358,6 +1468,11 @@ impl App {
             Some(QuickSwitchItem::Session(m)) => {
                 let session_id = m.session_id;
                 self.ui_state.modal = Modal::None;
+                // The palette spans every workspace; a pick from another one
+                // switches there first so the jump lands on a visible row.
+                if m.other_workspace.is_some() {
+                    self.switch_workspace(m.workspace.clone(), false).await;
+                }
                 // The target may be hidden by an active project filter (the
                 // palette lists every session regardless of the filter). Clear
                 // it and rebuild so the jump always lands — quick-switch is the
@@ -1453,6 +1568,16 @@ impl App {
                     on_confirm: ConfirmAction::SetSessionBase { session_id, target },
                 };
             }
+            Some(QuickSwitchItem::Workspace { name, .. }) => {
+                self.ui_state.modal = Modal::None;
+                self.switch_workspace(name, true).await;
+            }
+            Some(QuickSwitchItem::ProjectWorkspace {
+                project_id, target, ..
+            }) => {
+                self.ui_state.modal = Modal::None;
+                self.move_project_to_workspace(project_id, target).await;
+            }
             Some(QuickSwitchItem::ProgramChange {
                 session_id,
                 program,
@@ -1472,11 +1597,25 @@ impl App {
             // No row is highlighted. Only the repo picker can still act: the
             // typed text is a clone URL (validated in `open_clone_url_prompt`,
             // which leaves the picker open and says why if it's refused).
-            None => {
-                if let Some(typed) = unmatched {
+            None => match (mode, unmatched) {
+                (PaletteMode::RepositoryPicker, Some(typed)) => {
                     self.open_clone_url_prompt(&typed);
                 }
-            }
+                // A name no workspace matches: create it, then act on it.
+                (PaletteMode::WorkspacePicker, Some(typed)) => {
+                    self.ui_state.modal = Modal::None;
+                    if let Some(name) = self.create_workspace(&typed).await {
+                        self.switch_workspace(Some(name), true).await;
+                    }
+                }
+                (PaletteMode::MoveProjectPicker { project_id }, Some(typed)) => {
+                    self.ui_state.modal = Modal::None;
+                    if let Some(name) = self.create_workspace(&typed).await {
+                        self.move_project_to_workspace(project_id, Some(name)).await;
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
@@ -1698,6 +1837,21 @@ impl App {
             UserCommand::ToggleSection => {
                 self.handle_toggle_section().await;
             }
+            UserCommand::NextWorkspace => {
+                self.handle_cycle_workspace(true).await;
+            }
+            UserCommand::PreviousWorkspace => {
+                self.handle_cycle_workspace(false).await;
+            }
+            UserCommand::WorkspacePicker => {
+                self.open_workspace_picker().await;
+            }
+            UserCommand::NewWorkspace => {
+                self.handle_new_workspace();
+            }
+            UserCommand::MoveProjectToWorkspace => {
+                self.handle_move_project_to_workspace().await;
+            }
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }
@@ -1760,6 +1914,9 @@ impl App {
             UserCommand::ToggleVoiceInput => {
                 self.toggle_voice_input().await;
             }
+            UserCommand::ToggleDictation => {
+                self.toggle_dictation().await;
+            }
             UserCommand::OpenReviewDiff => {
                 self.handle_open_review().await;
             }
@@ -1779,12 +1936,17 @@ impl App {
                     editing: None,
                     rows,
                     sections_state: SectionsState::default(),
+                    workspaces_state: WorkspacesState::default(),
                     programs_state: ProgramsState::default(),
+                    theme_scope: self.default_theme_scope(),
                     search: None,
                 });
             }
             UserCommand::EditServerPrograms => {
                 self.open_settings_on_programs(self.selected_backend_id());
+            }
+            UserCommand::CopyServerToken => {
+                self.copy_server_token().await;
             }
             UserCommand::Quit => {
                 self.ui_state.should_quit = true;
@@ -2228,7 +2390,7 @@ mod tests {
         // arm was missing from the InputEvent::Paste match.
         let mut modal = checkout_modal("");
         let refilter = apply_paste_to_modal(&mut modal, "feature-foo");
-        assert_eq!(refilter, Some(PasteRefilter::CheckoutBranch));
+        assert_eq!(refilter, Some(Refilter::CheckoutBranch));
         match modal {
             Modal::CheckoutBranch { query, .. } => assert_eq!(query.value(), "feature-foo"),
             _ => panic!("modal variant changed"),
@@ -2264,7 +2426,7 @@ mod tests {
     fn paste_into_quick_switch_appends_and_requests_refilter() {
         let mut modal = quick_switch_modal("");
         let refilter = apply_paste_to_modal(&mut modal, "hello");
-        assert_eq!(refilter, Some(PasteRefilter::QuickSwitch));
+        assert_eq!(refilter, Some(Refilter::QuickSwitch));
         match modal {
             Modal::QuickSwitch { query, .. } => assert_eq!(query.value(), "hello"),
             _ => panic!("modal variant changed"),
@@ -2313,6 +2475,52 @@ diff --git a/a.rs b/a.rs
             }
             _ => panic!("modal variant changed"),
         }
+    }
+
+    #[test]
+    fn paste_into_the_conversation_input_appends() {
+        // Regression: the overlay's input had no paste arm, so a paste there
+        // was silently dropped. It shares `text_field` with dictation now.
+        let mut modal = Modal::Conversation {
+            input: "hi ".into(),
+            scroll: 0,
+        };
+        assert_eq!(apply_paste_to_modal(&mut modal, "there\n"), None);
+        match modal {
+            Modal::Conversation { input, .. } => assert_eq!(input.value(), "hi there"),
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    #[test]
+    fn review_without_an_open_comment_has_no_text_field() {
+        let mut modal = review_modal_with_open_draft();
+        if let Modal::ReviewDiff(state) = &mut modal {
+            state.comment = None;
+        }
+        assert!(text_field(&mut modal).is_none());
+        assert!(dictation_field(&mut modal).is_none());
+    }
+
+    #[test]
+    fn dictation_takes_every_text_field_but_secrets_and_colours() {
+        // Dictation and paste share one list of text fields; dictation narrows
+        // it by the masked (secret) field and the colour picker (covered in
+        // `app::tests`, which can build a Settings modal).
+        assert!(dictation_field(&mut input_modal("")).is_some());
+        assert!(dictation_field(&mut quick_switch_modal("")).is_some());
+        assert!(dictation_field(&mut checkout_modal("")).is_some());
+        assert!(dictation_field(&mut review_modal_with_open_draft()).is_some());
+        let mut masked = input_modal("");
+        if let Modal::Input { mask, .. } = &mut masked {
+            *mask = true;
+        }
+        assert!(
+            text_field(&mut masked).is_some(),
+            "a secret still takes a paste"
+        );
+        assert!(dictation_field(&mut masked).is_none());
+        assert!(dictation_field(&mut Modal::None).is_none());
     }
 
     #[test]

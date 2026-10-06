@@ -13,9 +13,11 @@ import '../support/insets.dart';
 /// The wide LCARS frame's safe-area treatment.
 ///
 /// It is a *different* frame from the phone shell — three columns rather than
-/// two, and its right-hand workspace opens with a plain text header instead of
-/// an elbow cap. So the band runs across the nav and fleet columns only, and
-/// the workspace holds its insets like a pushed page's body does.
+/// two, each opening with a block that bleeds into the status bar: the nav
+/// rail's identifier and an elbow cap over each of the fleet and detail
+/// columns. The detail column's cap is easy to forget, because the implementation
+/// once lacked it and this doc described that state; 'the detail column
+/// carries a cap of its own' below is what pins it now.
 ///
 /// The three-column layout needs a surface past `kLcarsThreeColumnWidth`
 /// (1180dp), which no phone reaches — it is the desktop shape, where the insets
@@ -37,7 +39,7 @@ void main() {
       home: ChromeWide(
         ChromeWideSpec(
           fleetList: const SizedBox.expand(key: Key('fleet-list')),
-          workspace: const SizedBox.expand(key: Key('workspace')),
+          detail: const SizedBox.expand(key: Key('detail')),
           modes: [
             ChromeNavItem(
               label: 'Fleet',
@@ -115,11 +117,13 @@ void main() {
       expect(tester.getSize(find.byType(ChromeElbow).last).height, 44 + 48);
     });
 
-    // The band has to be *continuous*. The nav and fleet columns both bleed into
-    // it with a 5dp gap between them, and leaving that gap open cuts a black
-    // slit through the status bar — the same defect the phone frame's rail seam
-    // had, measured there on a Pixel 8a as a black column through the clock.
-    testWidgets('the band is continuous across the gap between the columns', (
+    // The gaps between the columns run open through the band, the same rule the
+    // phone frame's rail/content gutter follows. Both were filled for a while,
+    // to keep a black slit out of the status bar — but a filled gap leaves each
+    // cap's bottom-left radius nothing to curve out of, and squaring them made
+    // the frame turn its corners at a bare 90°. The slit is the accepted cost;
+    // see `elbow_bleed_test.dart` for the corner it buys back.
+    testWidgets('the gaps between the columns run open through the band', (
       tester,
     ) async {
       await pump(tester, width: 1400, top: 24);
@@ -127,26 +131,26 @@ void main() {
       final navRight = tester.getRect(find.byType(ChromeElbow).first).right;
       expect(
         await pixelAt(tester, Offset(navRight + 2, 12)),
-        lcarsTokens.primary,
-        reason: 'the gap between the nav and fleet columns is open',
+        lcarsTokens.canvas,
+        reason: 'the gap between the nav and fleet columns is filled',
       );
     });
 
-    testWidgets('the workspace is held off both insets', (tester) async {
+    testWidgets('the detail pane is held off both insets', (tester) async {
       await pump(tester, width: 1400, top: 24, bottom: 48);
 
-      final workspace = tester.getRect(find.byKey(const Key('workspace')));
+      final detail = tester.getRect(find.byKey(const Key('detail')));
       // Below the band rather than below the raw inset: this column opens with
       // a cap of its own, so its content starts under that, not under the
       // status bar.
       final band = tester.getRect(find.byType(ChromeElbowCap).last);
-      expect(workspace.top, greaterThanOrEqualTo(band.bottom));
-      expect(workspace.bottom, surfaceHeight(tester) - 48);
+      expect(detail.top, greaterThanOrEqualTo(band.bottom));
+      expect(detail.bottom, surfaceHeight(tester) - 48);
     });
 
     // What the gap under each cap is for. Both columns open the same way — cap,
     // gap, content — so the session title starts level with FLEET beside it.
-    // The workspace header used to pay a top pad of its own on top of that,
+    // The detail header used to pay a top pad of its own on top of that,
     // which dropped it below.
     testWidgets('both columns start their content at the same height', (
       tester,
@@ -154,7 +158,7 @@ void main() {
       await pump(tester, width: 1400, top: 24);
 
       expect(
-        tester.getRect(find.byKey(const Key('workspace'))).top,
+        tester.getRect(find.byKey(const Key('detail'))).top,
         // Scoped to the fleet column: the nav rail carries a 'FLEET' block
         // label too, and a bare text finder matches both.
         tester
@@ -168,21 +172,19 @@ void main() {
       );
     });
 
-    // The deck gives the workspace column its own elbow cap in every landscape
+    // The deck gives the detail column its own elbow cap in every landscape
     // frame (4b's L1/L2/L3, a ~16px bar with a bottom-left radius above the
     // session title), and the implementation had dropped it. It is what makes
     // the top of the frame read as three columns stepping down rather than one
     // slab, and it is what carries the band across the status bar without a
     // fill bolted on beside it.
-    testWidgets('the workspace column carries a cap of its own', (
-      tester,
-    ) async {
+    testWidgets('the detail column carries a cap of its own', (tester) async {
       await pump(tester, width: 1400);
 
       final caps = tester.widgetList<ChromeElbowCap>(
         find.byType(ChromeElbowCap),
       );
-      expect(caps.length, 2, reason: 'the fleet column and the workspace');
+      expect(caps.length, 2, reason: 'the fleet column and the detail pane');
       // Present with no inset to bleed into as well — the deck draws it on the
       // desktop frames too, so it is the column's shape and not a safe-area
       // fixture.
@@ -210,7 +212,7 @@ void main() {
     // The band covers the *whole* status bar, not just the columns that have
     // blocks in them. Measured on a Pixel 8a when it did not: the frame asks
     // for dark system icons, correct over a bright band — and the bluetooth,
-    // signal and wifi glyphs, which sit at the far right over the workspace
+    // signal and wifi glyphs, which sit at the far right over the detail pane
     // column, drew dark on black and vanished. Every pixel sampled from
     // x=2050-2350 came back (0,0,0).
     testWidgets('the band runs the full width of the status bar', (
@@ -231,11 +233,13 @@ void main() {
       }
     });
 
-    testWidgets('the workspace runs flush to the right bezel', (tester) async {
+    testWidgets('the detail pane runs flush to the right bezel', (
+      tester,
+    ) async {
       await pump(tester, width: 1400);
 
       expect(
-        tester.getRect(find.byKey(const Key('workspace'))).right,
+        tester.getRect(find.byKey(const Key('detail'))).right,
         surfaceWidth(tester),
       );
     });
@@ -245,7 +249,7 @@ void main() {
 
       expect(tester.getRect(find.byType(ChromeElbow).first).left, 20);
       expect(
-        tester.getRect(find.byKey(const Key('workspace'))).right,
+        tester.getRect(find.byKey(const Key('detail'))).right,
         surfaceWidth(tester) - 20,
       );
     });

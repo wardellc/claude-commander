@@ -1,12 +1,13 @@
 //! Router construction: the `/api` surface (behind bearer auth + a CORS layer),
-//! the `/ws` upgrade, and a lightweight `/health` liveness probe.
+//! the `/ws` upgrade, a lightweight `/health` liveness probe, and the embedded
+//! web UI as the fallback for everything else.
 
 use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::{HeaderValue, Method, header::AUTHORIZATION},
     middleware::from_fn_with_state,
-    routing::{delete, get, post, put},
+    routing::{any, delete, get, post, put},
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -16,10 +17,19 @@ use tracing::warn;
 
 use crate::auth::require_bearer;
 use crate::handlers::{
-    blobs, cascade, config, github, health, paste, projects, review, sessions, workspace,
+    blobs, cascade, config, github, health, paste, projects, review, sessions, snapshot,
 };
 use crate::state::AppState;
-use crate::ws;
+use crate::{webui, ws};
+
+/// The `/api` and `/ws` fallback: a JSON 404 in the shared error envelope.
+async fn api_not_found() -> axum::response::Response {
+    crate::error::error_response(
+        axum::http::StatusCode::NOT_FOUND,
+        "route",
+        "no such endpoint",
+    )
+}
 
 /// Build the CORS layer for the `/api` surface from the configured allowlist.
 ///
@@ -52,17 +62,37 @@ fn cors_layer(allowed_origins: &[String]) -> CorsLayer {
         .allow_headers([AUTHORIZATION, axum::http::header::CONTENT_TYPE])
 }
 
+/// Include successful config/comment/review writes in the observable generation
+/// even when their persistence store is separate from state.json.
+async fn notify_mutation(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mutation = !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    let response = next.run(request).await;
+    if mutation && response.status().is_success() {
+        state.service.store().notify_change();
+    }
+    response
+}
+
 /// Build the full application router.
 pub fn build_router(state: AppState) -> Router {
     let auth = state.auth.clone();
+    let auth_for_slash = auth.clone();
     let cors = cors_layer(&state.cors_allowed_origins);
 
     let api = Router::new()
         // -- workspace surface --
-        .route("/workspace", get(workspace::snapshot))
-        .route("/agent-states", get(workspace::agent_states))
-        .route("/pr-refresh", post(workspace::pr_refresh))
-        .route("/create-options", get(workspace::create_options))
+        .route("/workspace", get(snapshot::snapshot))
+        .route("/changes", get(snapshot::changes))
+        .route("/agent-states", get(snapshot::agent_states))
+        .route("/pr-refresh", post(snapshot::pr_refresh))
+        .route("/create-options", get(snapshot::create_options))
         .route("/comments/pending", get(review::pending))
         // -- cascade / push-stack --
         .route("/cascade/resume", post(cascade::resume))
@@ -123,6 +153,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/scan", post(projects::scan))
         .route("/projects/ensure", post(projects::ensure))
         .route("/projects/{id}", delete(projects::delete))
+        .route("/projects/{id}/workspace", put(projects::set_workspace))
         .route("/projects/{id}/branches", get(projects::branches))
         .route("/projects/{id}/preview", get(projects::preview))
         // -- repo picker + clone --
@@ -142,23 +173,46 @@ pub fn build_router(state: AppState) -> Router {
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
         .route("/config/programs", put(config::put_programs))
+        // -- workspaces (definitions; project tags go via /projects/{id}/workspace) --
+        .route("/config/workspaces", put(config::put_workspaces))
+        .route("/config/workspaces/rename", post(config::rename_workspace))
+        .route("/config/workspaces/delete", post(config::delete_workspace))
         .route("/config/reload", post(config::reload))
         .route("/health/tmux", get(config::health_tmux))
+        // An `/api` miss is an API 404, never the web UI's `index.html`: without
+        // its own fallback a nested miss would reach the root fallback below
+        // and answer 200 HTML to a client expecting JSON. Declared *before* the
+        // layers so it sits behind auth too — an unauthenticated probe gets the
+        // same 401 as a real route and learns nothing about which paths exist.
+        .fallback(api_not_found)
         // Bearer auth guards the whole `/api` surface; the CORS layer sits
         // outside auth so browser preflight (OPTIONS, unauthenticated) is
         // answered correctly.
+        .layer(from_fn_with_state(state.clone(), notify_mutation))
         .layer(from_fn_with_state(auth, require_bearer))
         .layer(cors);
 
     // The WS handshake authenticates in-band (browsers can't set headers on the
     // upgrade), so `/ws` sits outside the `/api` bearer layer.
-    let ws = Router::new().route("/attach", get(ws::attach));
+    let ws = Router::new()
+        .route("/attach", get(ws::attach))
+        .fallback(api_not_found);
+
+    // `nest("/api")` matches `/api` and `/api/…` but not `/api/` itself, which
+    // would otherwise fall through to the page. Answer it as the API would —
+    // behind the same bearer check — rather than with `index.html`.
+    let api_slash = any(api_not_found).layer(from_fn_with_state(auth_for_slash, require_bearer));
 
     Router::new()
         .nest("/api", api)
+        .route("/api/", api_slash)
         .nest("/ws", ws)
+        .route("/ws/", any(api_not_found))
         // Lightweight liveness probe, outside the auth layer.
         .route("/health", get(health::live))
+        // Everything else is the embedded web UI (unknown paths → index.html),
+        // outside the auth layer like `/health`: the page holds no data.
+        .fallback(webui::serve)
         // Defense-in-depth: a panicking handler returns 500 instead of dropping
         // the connection (complements `run_local`'s explicit 500 mapping).
         .layer(CatchPanicLayer::new())
@@ -174,6 +228,77 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::handlers::test_support::test_state;
+
+    #[tokio::test]
+    async fn changes_bootstraps_and_wakes_after_a_mutation() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let app = super::build_router(state);
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/changes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let generation: u64 = serde_json::from_slice(&bytes).unwrap();
+        let waiter = app.clone();
+        let mut waiting = tokio::spawn(async move {
+            waiter
+                .oneshot(
+                    Request::get(format!("/api/changes?since={generation}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut waiting)
+                .await
+                .is_err(),
+            "unchanged generations must wait instead of returning immediately"
+        );
+        let mutation = app
+            .oneshot(
+                Request::post("/api/pr-refresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mutation.status(), axum::http::StatusCode::ACCEPTED);
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_ne!(serde_json::from_slice::<u64>(&bytes).unwrap(), generation);
+    }
+
+    #[tokio::test]
+    async fn change_waits_require_authentication() {
+        let dir = TempDir::new().unwrap();
+        let mut state = test_state(&dir);
+        state.auth = std::sync::Arc::new(crate::auth::AuthConfig::Token("test-token".into()));
+        let app = super::build_router(state);
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/changes").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let response = app
+            .oneshot(
+                Request::get("/api/changes")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
 
     const ALLOWED: &str = "https://app.example.com";
     const OTHER: &str = "https://evil.example.com";
@@ -281,6 +406,335 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .is_none(),
             "empty allowlist must not emit a CORS allow header"
+        );
+    }
+
+    /// The snapshot is served at `/api/workspace` with a fixed top-level key
+    /// set. The Rust type is named `Snapshot`, but the URL and the JSON shape
+    /// are the wire contract every client (TUI remote, Flutter) builds against,
+    /// so a rename must not move either.
+    #[tokio::test]
+    async fn snapshot_is_served_at_api_workspace_with_a_stable_shape() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+
+        let req = Request::get("/api/workspace").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("snapshot is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cascade_paused",
+                "main_workspace",
+                "operations",
+                "pending_comment_sessions",
+                "project_pull",
+                "projects",
+                "server",
+                "sessions",
+                "startup_workspace",
+                "workspaces",
+            ]
+        );
+    }
+
+    /// A router whose `/api` surface demands a bearer token, for the asset
+    /// tests that must prove the fallback does not shadow auth.
+    fn token_router(dir: &TempDir) -> axum::Router {
+        let state = crate::state::AppState::new(
+            test_state(dir).service,
+            crate::auth::AuthConfig::Token("secret".into()),
+        );
+        super::build_router(state)
+    }
+
+    async fn get_resp(app: axum::Router, uri: &str) -> axum::response::Response {
+        app.oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn content_type(resp: &axum::response::Response) -> String {
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    async fn body_string(resp: axum::response::Response) -> String {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The web UI is served from the root, unauthenticated (the page itself
+    /// holds no data; every call it makes goes through `/api`'s bearer layer).
+    #[tokio::test]
+    async fn root_serves_the_embedded_index_html() {
+        let dir = TempDir::new().unwrap();
+        let resp = get_resp(token_router(&dir), "/").await;
+        assert_eq!(resp.status(), 200);
+        assert!(content_type(&resp).starts_with("text/html"), "{resp:?}");
+        let body = body_string(resp).await;
+        assert!(body.contains("<title>Claude Commander</title>"), "{body}");
+    }
+
+    /// A browser reload of a client-side route still loads the app.
+    #[tokio::test]
+    async fn unknown_page_path_falls_back_to_index_html() {
+        let dir = TempDir::new().unwrap();
+        let resp = get_resp(token_router(&dir), "/sessions/some-client-route").await;
+        assert_eq!(resp.status(), 200);
+        assert!(content_type(&resp).starts_with("text/html"), "{resp:?}");
+        assert!(
+            body_string(resp)
+                .await
+                .contains("<title>Claude Commander</title>")
+        );
+    }
+
+    /// Scripts carry a JavaScript MIME type (a browser refuses to execute a
+    /// script served as `text/html` under `nosniff`), plus the caching headers:
+    /// revalidate every time, keyed on a content hash.
+    #[tokio::test]
+    async fn app_js_is_served_as_javascript_with_an_etag() {
+        let dir = TempDir::new().unwrap();
+        let resp = get_resp(token_router(&dir), "/app.js").await;
+        assert_eq!(resp.status(), 200);
+        assert!(content_type(&resp).contains("javascript"), "{resp:?}");
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+        assert!(resp.headers().get(header::ETAG).is_some(), "{resp:?}");
+    }
+
+    /// A matching `If-None-Match` answers 304 with no body.
+    #[tokio::test]
+    async fn matching_if_none_match_is_not_modified() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        let first = get_resp(app.clone(), "/app.js").await;
+        let etag = first.headers().get(header::ETAG).unwrap().clone();
+        let req = Request::get("/app.js")
+            .header(header::IF_NONE_MATCH, etag)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 304);
+        assert!(body_string(resp).await.is_empty());
+    }
+
+    /// The terminal is embedded too — without it the page loads but can never
+    /// attach. web/build.mjs bundles xterm.js (+ its fit addon) into `app.js`,
+    /// with a licence banner naming each package, and inlines xterm's
+    /// stylesheet into `style.css`.
+    #[tokio::test]
+    async fn bundled_xterm_is_embedded() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+
+        let js = get_resp(app.clone(), "/app.js").await;
+        assert_eq!(js.status(), 200);
+        let js = body_string(js).await;
+        for pkg in ["@xterm/xterm@", "@xterm/addon-fit@"] {
+            assert!(js.contains(pkg), "app.js lacks {pkg}");
+        }
+
+        let css = get_resp(app, "/style.css").await;
+        assert_eq!(css.status(), 200);
+        assert!(content_type(&css).starts_with("text/css"), "{css:?}");
+        assert!(body_string(css).await.contains(".xterm-viewport"));
+    }
+
+    /// Every page response carries the hardening headers: no MIME sniffing, no
+    /// framing (clickjacking a page that holds a bearer token), no referrer,
+    /// and a CSP that allows only same-origin scripts and connections.
+    #[tokio::test]
+    async fn page_responses_carry_security_headers() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        for path in ["/", "/app.js", "/style.css", "/some-client-route"] {
+            let resp = get_resp(app.clone(), path).await;
+            assert_eq!(resp.status(), 200, "{path}");
+            let h = resp.headers();
+            let get = |name: &str| {
+                h.get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_else(|| panic!("{path}: no {name}"))
+                    .to_owned()
+            };
+            assert_eq!(get("x-content-type-options"), "nosniff", "{path}");
+            assert_eq!(get("x-frame-options"), "DENY", "{path}");
+            assert_eq!(get("referrer-policy"), "no-referrer", "{path}");
+            let csp = get("content-security-policy");
+            for directive in [
+                "default-src 'self'",
+                "script-src 'self'",
+                "connect-src 'self' ws: wss:",
+                "frame-ancestors 'none'",
+            ] {
+                assert!(csp.contains(directive), "{path}: {csp} lacks {directive}");
+            }
+            assert!(!csp.contains("unsafe-eval"), "{path}: {csp}");
+        }
+    }
+
+    /// The page is read-only: anything but GET/HEAD is a 405, not the page.
+    #[tokio::test]
+    async fn non_get_page_requests_are_method_not_allowed() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        for (method, path) in [("POST", "/"), ("PUT", "/app.js"), ("DELETE", "/x")] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 405, "{method} {path}");
+            assert_eq!(resp.headers().get(header::ALLOW).unwrap(), "GET, HEAD");
+        }
+        let head = Request::head("/").body(Body::empty()).unwrap();
+        assert_eq!(app.oneshot(head).await.unwrap().status(), 200);
+    }
+
+    /// A missing *file* (the last segment has an extension) is a 404, not
+    /// `index.html`: HTML served as a source map or a script is a confusing
+    /// failure, and a 200 hides the missing asset. Extension-less paths are
+    /// client-side routes and still get the page.
+    #[tokio::test]
+    async fn missing_asset_paths_are_404_not_the_page() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        for path in ["/app.js.map", "/vendor/xterm.js", "/nope.css"] {
+            let resp = get_resp(app.clone(), path).await;
+            assert_eq!(resp.status(), 404, "{path}");
+            assert!(!content_type(&resp).starts_with("text/html"), "{path}");
+        }
+    }
+
+    /// The favicon is the real SVG, not a Git LFS pointer (which is what a
+    /// checkout without LFS smudging would embed).
+    #[tokio::test]
+    async fn favicon_is_a_real_svg() {
+        let dir = TempDir::new().unwrap();
+        let resp = get_resp(token_router(&dir), "/favicon.svg").await;
+        assert_eq!(resp.status(), 200);
+        assert!(content_type(&resp).starts_with("image/svg"), "{resp:?}");
+        assert!(body_string(resp).await.starts_with("<svg"));
+    }
+
+    /// The fallback sits outside the bearer layer but must not swallow `/api`:
+    /// a real route still demands the token.
+    #[tokio::test]
+    async fn api_routes_still_require_the_bearer_token() {
+        let dir = TempDir::new().unwrap();
+        let resp = get_resp(token_router(&dir), "/api/sessions").await;
+        assert_eq!(resp.status(), 401);
+        assert!(
+            content_type(&resp).starts_with("application/json"),
+            "{resp:?}"
+        );
+    }
+
+    /// An unknown `/api` path is an API miss — 401 without a token, a JSON 404
+    /// with one — never the page. Serving `index.html` there would hand a
+    /// client a 200 it then tries to parse as JSON.
+    #[tokio::test]
+    async fn unknown_api_paths_are_not_the_page() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        for path in ["/api", "/api/", "/api/nope", "/api/sessions/x/nope/deeper"] {
+            let resp = get_resp(app.clone(), path).await;
+            assert_eq!(resp.status(), 401, "{path} without a token");
+            assert!(!content_type(&resp).starts_with("text/html"), "{path}");
+
+            let req = Request::get(path)
+                .header(header::AUTHORIZATION, "Bearer secret")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 404, "{path} with a token");
+            assert!(
+                content_type(&resp).starts_with("application/json"),
+                "{path}"
+            );
+        }
+    }
+
+    /// `/health` keeps its plain liveness body; the fallback does not replace it.
+    #[tokio::test]
+    async fn health_is_unchanged_by_the_fallback() {
+        let dir = TempDir::new().unwrap();
+        let resp = get_resp(token_router(&dir), "/health").await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(body_string(resp).await, "ok");
+    }
+
+    /// `/ws/attach` is still the WS handler (a plain GET is refused as a
+    /// non-upgrade, not answered with the page), and a `/ws` miss is a 404.
+    #[tokio::test]
+    async fn ws_attach_is_not_shadowed_by_the_fallback() {
+        let dir = TempDir::new().unwrap();
+        let app = token_router(&dir);
+        let resp = get_resp(app.clone(), "/ws/attach").await;
+        assert_ne!(resp.status(), 200);
+        assert!(!content_type(&resp).starts_with("text/html"), "{resp:?}");
+
+        for path in ["/ws", "/ws/", "/ws/nope"] {
+            let resp = get_resp(app.clone(), path).await;
+            assert_eq!(resp.status(), 404, "{path}");
+            assert!(!content_type(&resp).starts_with("text/html"), "{path}");
+        }
+    }
+
+    /// The workspace routes are reachable through the real router (and so
+    /// behind auth, with the static `rename`/`delete` segments not shadowed).
+    #[tokio::test]
+    async fn workspace_routes_are_mounted() {
+        let dir = TempDir::new().unwrap();
+        let app = super::build_router(test_state(&dir));
+        for (method, uri, body) in [
+            (
+                "PUT",
+                "/api/config/workspaces",
+                r#"{"workspaces":[{"name":"Work"}]}"#,
+            ),
+            (
+                "POST",
+                "/api/config/workspaces/rename",
+                r#"{"from":"Work","to":"Job"}"#,
+            ),
+            ("POST", "/api/config/workspaces/delete", r#"{"name":"Job"}"#),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), 204, "{method} {uri}");
+        }
+        let req = Request::put(format!("/api/projects/{}/workspace", uuid::Uuid::new_v4()))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"workspace":"Work"}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            404,
+            "an unknown project, not an unmounted route"
         );
     }
 }

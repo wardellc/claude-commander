@@ -63,9 +63,11 @@ use claude_commander_core::git::{
 use claude_commander_core::session::{
     AgentState, Board, BoardPos, ProjectId, SessionId, SessionListItem, SessionStatus,
 };
+use claude_commander_core::tmux::PaneInfo;
 
 mod actions;
 mod background;
+mod colour_picker;
 mod conversation;
 mod event_loop;
 mod input;
@@ -76,6 +78,8 @@ mod selection;
 mod settings;
 mod state;
 mod switcher;
+mod workspace_settings;
+mod workspaces;
 
 #[cfg(test)]
 mod tests;
@@ -139,24 +143,26 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
 /// agent-states fetch falls back to empty. Returns `false` only when the event
 /// channel has closed, so a feed loop knows to stop.
 async fn fetch_and_send_backend_change(
+    sequence: Arc<std::sync::atomic::AtomicU64>,
     backend_id: usize,
     backend: Arc<dyn CommanderBackend>,
     tx: tokio::sync::mpsc::Sender<AppEvent>,
 ) -> bool {
-    let snapshot = match backend.workspace_snapshot().await {
+    let revision = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
+    let snapshot = match snapshot {
         Ok(s) => s,
         Err(e) => {
             debug!("Snapshot refresh for backend {backend_id} failed: {e}");
             return true;
         }
     };
-    let states = backend.agent_states(false).await.unwrap_or_else(|_| {
-        claude_commander_core::api::AgentStatesSnapshot {
-            states: Default::default(),
-            commander_running: false,
-        }
+    let states = states.unwrap_or_else(|_| claude_commander_core::api::AgentStatesSnapshot {
+        states: Default::default(),
+        commander_running: false,
     });
     tx.send(AppEvent::StateUpdate(StateUpdate::BackendChanged {
+        revision,
         backend_id,
         snapshot: Box::new(snapshot),
         states: Box::new(states),
@@ -180,7 +186,7 @@ async fn fetch_and_send_backend_change(
 /// for the rest of the outage.
 fn connection_from_snapshot(
     is_local: bool,
-    snapshot: &claude_commander_core::api::WorkspaceSnapshot,
+    snapshot: &claude_commander_core::api::Snapshot,
 ) -> Option<ConnectionState> {
     if !is_local {
         return None;
@@ -543,6 +549,13 @@ pub struct QuickSwitchMatch {
     /// query is empty (newest first, mirroring the pinned "Recent" block).
     /// `None` for sessions never attached, which sort to the bottom.
     pub last_attached_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The session's workspace (its project's tag; `None` = Main). Picking a
+    /// session outside the active workspace switches to this one first.
+    pub workspace: Option<String>,
+    /// The workspace's label when it is *not* the active one (and workspace UI
+    /// is showing), drawn as a dim tag; `None` for active-workspace rows, which
+    /// also rank first.
+    pub other_workspace: Option<String>,
 }
 
 /// How the quick-switch palette was opened.
@@ -586,6 +599,14 @@ pub enum PaletteMode {
     /// that changes the session's program and relaunches it.
     ProgramPicker {
         session_id: SessionId,
+    },
+    /// Workspace picker (`W`): one row per merged workspace; selecting one
+    /// switches to it. An unmatched query creates a workspace of that name.
+    WorkspacePicker,
+    /// Target picker for moving `project_id` to another workspace. An
+    /// unmatched query creates a workspace of that name and moves it there.
+    MoveProjectPicker {
+        project_id: ProjectId,
     },
 }
 
@@ -637,6 +658,19 @@ pub enum QuickSwitchItem {
         session_id: SessionId,
         /// The launch command to switch to.
         program: String,
+        /// Pre-formatted display label.
+        label: String,
+    },
+    /// Selecting this row switches to workspace `name` (`None` = Main).
+    Workspace {
+        name: Option<String>,
+        /// Pre-formatted display label (with waiting count / current marker).
+        label: String,
+    },
+    /// Selecting this row moves `project_id` into `target` (`None` = Main).
+    ProjectWorkspace {
+        project_id: ProjectId,
+        target: Option<String>,
         /// Pre-formatted display label.
         label: String,
     },
@@ -727,57 +761,72 @@ pub struct BranchEntry {
 }
 
 /// Which tab is active in the settings modal
+///
+/// Purely in-memory UI state — the modal opens on `General` every time and the
+/// active tab is never written to `config.toml` or `tui.json`, so the variants
+/// can be renamed freely. [`Voice`](Self::Voice) was called `Conversation` until
+/// it grew speech-to-text and dictation alongside the spoken replies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
     General,
-    Conversation,
+    Voice,
     Keybindings,
     Theme,
     Sections,
+    Workspaces,
     Programs,
+    Server,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 6] = [
+    const ALL: [SettingsTab; 8] = [
         Self::General,
-        Self::Conversation,
+        Self::Voice,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
+        Self::Workspaces,
         Self::Programs,
+        Self::Server,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
-            Self::Conversation => "Conversation",
+            Self::Voice => "Voice",
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
+            Self::Workspaces => "Workspaces",
             Self::Programs => "Programs",
+            Self::Server => "Server",
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Self::General => Self::Conversation,
-            Self::Conversation => Self::Keybindings,
+            Self::General => Self::Voice,
+            Self::Voice => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
-            Self::Sections => Self::Programs,
-            Self::Programs => Self::General,
+            Self::Sections => Self::Workspaces,
+            Self::Workspaces => Self::Programs,
+            Self::Programs => Self::Server,
+            Self::Server => Self::General,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::General => Self::Programs,
-            Self::Conversation => Self::General,
-            Self::Keybindings => Self::Conversation,
+            Self::General => Self::Server,
+            Self::Voice => Self::General,
+            Self::Keybindings => Self::Voice,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
-            Self::Programs => Self::Sections,
+            Self::Workspaces => Self::Sections,
+            Self::Programs => Self::Workspaces,
+            Self::Server => Self::Programs,
         }
     }
 }
@@ -816,6 +865,45 @@ impl Default for SectionsState {
             editing: None,
         }
     }
+}
+
+/// Which pane is focused in the Workspaces tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspacesFocus {
+    #[default]
+    List,
+    /// The right pane: the theme row, then the workspace's projects.
+    Detail,
+}
+
+/// State for the Workspaces tab. The list it edits is the *merged* one across
+/// every backend (index 0 is Main), read fresh from the snapshots each frame,
+/// so this holds only cursor and editing state.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspacesState {
+    /// Index into the merged workspace list.
+    pub selected: usize,
+    pub focus: WorkspacesFocus,
+    /// Detail-pane row: 0 = theme, 1.. = the workspace's projects.
+    pub detail_selected: usize,
+    pub editing: Option<WorkspacesEditing>,
+}
+
+/// Editing state for the Workspaces tab.
+#[derive(Debug, Clone)]
+pub enum WorkspacesEditing {
+    Creating {
+        value: Input,
+    },
+    Renaming {
+        value: Input,
+    },
+    /// `m` on a project: pick its target in the left list (`target` indexes
+    /// the merged list), Enter to move, Esc to cancel.
+    MovingProject {
+        project_id: ProjectId,
+        target: usize,
+    },
 }
 
 /// Which pane is focused in the Programs tab
@@ -904,12 +992,28 @@ pub struct SettingsState {
     pub rows: Vec<SettingsRow>,
     /// State for the Sections tab (lazily initialised on first tab switch)
     pub sections_state: SectionsState,
+    /// State for the Workspaces tab
+    pub workspaces_state: WorkspacesState,
     /// State for the Programs tab (lazily initialised on first tab switch)
     pub programs_state: ProgramsState,
+    /// Which theme the Theme tab edits. Opening settings defaults it to the
+    /// active workspace once there are two or more; the Workspaces tab's
+    /// Theme row sets it to the selected workspace.
+    pub theme_scope: ThemeScope,
     /// Active search filter for the Keybindings tab. `Some` while the search
     /// box is focused (typing filters the shortcut list live); `None` when the
     /// list is browsed normally.
     pub search: Option<Input>,
+}
+
+/// Which theme Settings → Theme edits.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ThemeScope {
+    /// `[theme]`, which every workspace without its own preset inherits.
+    #[default]
+    Usual,
+    /// One workspace's `[workspace_themes."<name>"]` (`None` = Main).
+    Workspace(Option<String>),
 }
 
 /// Kind of a settings row, carrying its typed value.
@@ -937,6 +1041,10 @@ pub struct SettingsRow {
     pub kind: SettingsRowKind,
     /// Optional color for displaying a swatch next to the value (Theme tab only)
     pub color_swatch: Option<Color>,
+    /// Where an inherited value comes from (`"usual"`, `"preset"`): the row
+    /// has no value of its own, so it is drawn dim with this note. `None` for
+    /// a value set in the scope being edited (Theme tab only).
+    pub inherited_from: Option<&'static str>,
 }
 
 impl SettingsRow {
@@ -951,6 +1059,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -961,6 +1070,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Toggle(on),
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -971,6 +1081,7 @@ impl SettingsRow {
             field_key: String::new(),
             kind: SettingsRowKind::Header,
             color_swatch: None,
+            inherited_from: None,
         }
     }
 
@@ -991,6 +1102,7 @@ impl SettingsRow {
             field_key: field_key.into(),
             kind: SettingsRowKind::Text(value.into()),
             color_swatch: Some(color),
+            inherited_from: None,
         }
     }
 
@@ -1025,6 +1137,10 @@ pub enum SettingsEditing {
     OptionPicker {
         options: Vec<PickerOption>,
         selected: usize,
+    },
+    /// A Theme-tab colour row: the swatch grid and hex row.
+    Colour {
+        picker: Box<colour_picker::ColourPicker>,
     },
 }
 
@@ -1401,6 +1517,9 @@ pub enum InputAction {
     /// the name derived from `source` and editable. An empty submission means
     /// "derive it" (`CloneRequest::dest_name = None`), which is a valid choice
     /// rather than an error.
+    /// Name for a new workspace (`NewWorkspace`); created on every backend,
+    /// then switched to.
+    NewWorkspace,
     CloneDestName {
         /// Backend the clone runs on — the one the picker was opened against,
         /// carried explicitly so it can't drift with the tree selection.
@@ -1495,6 +1614,11 @@ pub struct AppUiState {
     /// sidebar cursor (see `refresh_list_items`), cleared by Esc in the main
     /// view. `ProjectId`s are globally unique, so this needs no backend qualifier.
     pub board_filter: Option<ProjectId>,
+    /// The workspace the user asked to see (`None` = Main). Kept as asked:
+    /// the *effective* workspace is this when some backend still has it, else
+    /// Main (see `App::active_workspace`), so a startup workspace takes effect
+    /// once the snapshot carrying it arrives.
+    pub active_workspace: Option<String>,
     /// Enriched PR info for the currently selected session
     pub enriched_pr: Option<(SessionId, EnrichedPrInfo)>,
     /// Session whose enriched-PR fetch came back empty (no PR data, or `gh`
@@ -1555,6 +1679,12 @@ pub struct AppUiState {
     /// When the last background preview/shell capture was spawned (None = not
     /// in flight). Guards `spawn_preview_update` against double-spawns.
     pub preview_update_spawned_at: Option<Instant>,
+    pub preview_task: Option<tokio::task::JoinHandle<()>>,
+    pub last_preview_refresh: Instant,
+    pub last_ui_maintenance: Instant,
+    pub last_animation: Instant,
+    pub pending_selection: Option<SessionRef>,
+    pub pending_project: Option<(BackendId, ProjectId)>,
     /// Right-pane rect from the last render frame, for wheel hit-testing.
     /// `None` in board view (no right pane) and before the first frame.
     pub right_pane_rect: Option<Rect>,
@@ -1572,6 +1702,11 @@ pub struct AppUiState {
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
     pub terminal_size: Rect,
+    /// Whose theme `App::theme` was last built for: `None` for the usual
+    /// `[theme]` (workspace UI hidden), `Some(workspace)` (`Some(None)` = Main)
+    /// once there are workspaces. `refresh_list_items` rebuilds the theme when
+    /// `App::theme_workspace` moves off it.
+    pub theme_workspace: Option<Option<String>>,
     /// Inner rect of the review-diff body pane, recorded each render frame so
     /// mouse events can map a screen position to a diff line. `None` unless the
     /// review view is open.
@@ -1614,6 +1749,10 @@ pub struct AppUiState {
     /// the background agent-state poll so the (sync) renderers — the footer chip
     /// — can read it without awaiting tmux.
     pub commander_running: bool,
+    /// The in-process HTTP server's outcome, or `None` when this run was never
+    /// asked to serve. Set once at startup by the binary (which owns the server
+    /// dependency) and read by the status-bar chip and the copy-token command.
+    pub embedded_server: Option<crate::EmbeddedServerStatus>,
     /// What to attach to after the TUI tears down (set by select/shell/commander).
     pub attach_request: Option<AttachTarget>,
     /// Session whose review diff should be opened on returning to the TUI —
@@ -1724,6 +1863,7 @@ impl Default for AppUiState {
             board_heading_regions: Vec::new(),
             board_column_rects: None,
             board_filter: None,
+            active_workspace: None,
             enriched_pr: None,
             enriched_pr_unavailable: None,
             ai_summaries: std::collections::HashMap::new(),
@@ -1743,6 +1883,12 @@ impl Default for AppUiState {
             info_state: PreviewState::anchored_top(),
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             preview_update_spawned_at: None,
+            preview_task: None,
+            last_preview_refresh: Instant::now(),
+            last_ui_maintenance: Instant::now(),
+            last_animation: Instant::now(),
+            pending_selection: None,
+            pending_project: None,
             right_pane_rect: None,
             last_pane_view: None,
             status_message: None, // (message, expiry)
@@ -1760,6 +1906,7 @@ impl Default for AppUiState {
             selected_backend_connected: true,
             selected_backend_capabilities: BackendCapabilities::LOCAL,
             commander_running: false,
+            embedded_server: None,
             attach_request: None,
             pending_open_review: None,
             pending_switcher_target: None,
@@ -1771,6 +1918,7 @@ impl Default for AppUiState {
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
             terminal_size: Rect::default(),
+            theme_workspace: None,
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: BTreeMap::new(),
@@ -1835,6 +1983,9 @@ impl AppUiState {
             | BindableAction::OpenReviewDiff
             | BindableAction::OpenInfo
             | BindableAction::MoveToSection => has_session,
+            // Moving acts on the selected project (a session row selects its
+            // project too) on its owning backend.
+            BindableAction::MoveProjectToWorkspace => has_project,
             // Opening the operator's editor only works against a local worktree;
             // a remote backend has no path on this machine.
             BindableAction::OpenInEditor => {
@@ -1871,6 +2022,14 @@ impl AppUiState {
             | BindableAction::TogglePaneReverse
             | BindableAction::ShrinkLeftPane
             | BindableAction::GrowLeftPane => !self.view_mode.is_board(),
+            // Pairing a client only makes sense when something is actually
+            // being served. Without this gate the wildcard below would list it
+            // permanently, including in the overwhelmingly common run that
+            // serves nothing at all.
+            BindableAction::CopyServerToken => self
+                .embedded_server
+                .as_ref()
+                .is_some_and(|s| s.token().is_some()),
             // All other actions are always available
             _ => true,
         }
@@ -2119,13 +2278,9 @@ impl App {
             ));
         }
 
-        let base = config
-            .theme
-            .preset
-            .as_deref()
-            .and_then(Theme::from_preset)
-            .unwrap_or_default();
-        let theme = base.with_overrides(&config.theme);
+        // The usual theme: no workspace is active until the snapshots arrive,
+        // and `refresh_list_items` swaps in the active one's when it is.
+        let theme = Theme::from_overrides(&config.theme);
         let debounce = Duration::from_millis(config.session_number_debounce_ms);
         let commander_enabled_at_init = config.commander_enabled;
 
@@ -2157,6 +2312,36 @@ impl App {
             review_file_loads: RefCell::new(HashSet::new()),
             review_file_gen: Cell::new(0),
         }
+    }
+
+    /// A handle on the service backing this app, for the binary to serve over
+    /// HTTP in-process.
+    ///
+    /// `CommanderService` is a bundle of `Arc`s, so this is a shared handle
+    /// rather than a copy — which is the point. An embedded server built on a
+    /// *second* service would re-run telemetry init, rebuild the derived comment
+    /// and review stores, and give `state.json` a second writer inside one
+    /// process; sharing this one means the TUI and its clients see the same
+    /// state and the same background loops.
+    pub fn service_handle(&self) -> CommanderService {
+        self.service.clone()
+    }
+
+    /// Record how the in-process HTTP server fared, for the status-bar chip and
+    /// the copy-token command. Called by the binary before [`Self::run`], since
+    /// only the binary depends on the server crate.
+    ///
+    /// A failure also raises a toast, because the chip has to stay short enough
+    /// not to evict the action buttons — so the chip says *that* it failed and
+    /// the toast says why.
+    pub fn set_embedded_server(&mut self, status: crate::EmbeddedServerStatus) {
+        if let crate::EmbeddedServerStatus::Failed { reason } = &status {
+            self.ui_state.status_message = Some((
+                format!("Server not started: {reason}"),
+                Instant::now() + Duration::from_secs(10),
+            ));
+        }
+        self.ui_state.embedded_server = Some(status);
     }
 
     /// Construct the [`BackendHandle`] for one configured remote server: the
@@ -2334,16 +2519,19 @@ impl App {
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
         let backend = self.backend_arc(id);
-        let old_provider = self
+        let old_host = self
             .backend(id)
-            .map(|handle| handle.view.snapshot.server.effective_code_host().provider);
-        let snapshot = backend.workspace_snapshot().await;
-        let states = backend.agent_states(false).await;
-        let mut provider_changed = false;
+            .map(|handle| handle.view.snapshot.server.effective_code_host());
+        let (snapshot, states) = tokio::join!(backend.snapshot(), backend.agent_states(false));
+        let mut changed_host = None;
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
-                provider_changed = old_provider
-                    .is_some_and(|old| old != snapshot.server.effective_code_host().provider);
+                let host = snapshot.server.effective_code_host();
+                if old_host.is_some_and(|old| {
+                    old.provider != host.provider || old.hostname != host.hostname
+                }) {
+                    changed_host = Some(host);
+                }
                 handle.view.snapshot = snapshot;
                 // Local: derive connection from the snapshot's tmux health;
                 // remote: leave it to the connection-watch task (returns None).
@@ -2357,17 +2545,40 @@ impl App {
                 handle.view.agent_states = states;
             }
         }
-        if provider_changed {
-            self.ui_state.enriched_pr = None;
-            self.ui_state.enriched_pr_unavailable = None;
-            self.ui_state.enriched_pr_fetch_spawned_at = None;
-            if self.ui_state.repo_picker.backend == id {
-                self.ui_state.repo_picker = RepoPicker {
-                    backend: id,
-                    ..Default::default()
-                };
-            }
+        if let Some(host) = changed_host {
+            self.invalidate_code_host_caches(id, host);
             let _ = backend.request_pr_refresh().await;
+        }
+    }
+
+    fn invalidate_code_host_caches(
+        &mut self,
+        id: BackendId,
+        host: claude_commander_protocol::api::CodeHostStatus,
+    ) {
+        self.ui_state.enriched_pr = None;
+        self.ui_state.enriched_pr_unavailable = None;
+        self.ui_state.enriched_pr_fetch_spawned_at = None;
+        if self.ui_state.repo_picker.backend == id {
+            let generation = self.ui_state.repo_picker.generation.wrapping_add(1);
+            self.ui_state.repo_picker = RepoPicker {
+                backend: id,
+                generation,
+                host: claude_commander_protocol::hosting::CodeHost {
+                    provider: host.provider,
+                    hostname: host.hostname,
+                },
+                ..Default::default()
+            };
+            if matches!(
+                self.ui_state.modal,
+                Modal::QuickSwitch {
+                    mode: PaletteMode::RepositoryPicker,
+                    ..
+                }
+            ) {
+                self.refetch_repositories();
+            }
         }
     }
 
@@ -2381,7 +2592,7 @@ impl App {
         // Read back through the backend (which wraps the same store the test
         // seeded) rather than the store directly, so this stays clear of the
         // Phase-C store-access gate.
-        if let Ok(snapshot) = self.local_arc().workspace_snapshot().await {
+        if let Ok(snapshot) = self.local_arc().snapshot().await {
             self.backends[0].view.snapshot = snapshot;
             self.backends[0].view.connection =
                 claude_commander_core::backend::ConnectionState::Connected;
@@ -2477,6 +2688,39 @@ impl App {
                 },
             },
             None => AttachTarget::LocalName(name.to_string()),
+        }
+    }
+
+    /// Describe the pane an [`AttachTarget`] puts on screen, for the dictation
+    /// submit policy: which half of the session it is, and which harness runs
+    /// there.
+    ///
+    /// The harness comes from the session's configured `program` in the owning
+    /// backend's cached snapshot, so it is right for a remote session too. A ref
+    /// that isn't in the snapshot yields
+    /// [`AgentKind::Unknown`](claude_commander_core::agent::AgentKind::Unknown),
+    /// which costs only the per-harness submit delay — the `kind` the policy
+    /// actually gates on is carried by the target itself.
+    ///
+    /// A name-only target is the commander or a project shell: a shell with no
+    /// session behind it and so no harness to name. Under the `agent` policy
+    /// that is correctly never submitted into; under `always` it is submitted
+    /// into, which is what that setting asks for. (The commander pane is
+    /// arguably an agent — a follow-up, since it has no `SessionInfo` to read a
+    /// program from.)
+    pub(super) fn pane_info_for(&self, target: &AttachTarget) -> PaneInfo {
+        match target {
+            AttachTarget::Session { session, kind } => PaneInfo {
+                kind: *kind,
+                agent: self
+                    .session(*session)
+                    .map(|s| claude_commander_core::agent::AgentKind::from_program(&s.program))
+                    .unwrap_or(claude_commander_core::agent::AgentKind::Unknown),
+            },
+            AttachTarget::LocalName(_) => PaneInfo {
+                kind: AttachKind::Shell,
+                agent: claude_commander_core::agent::AgentKind::Unknown,
+            },
         }
     }
 
@@ -2578,7 +2822,7 @@ impl App {
             {
                 continue;
             }
-            let snapshot = handle.backend.workspace_snapshot().await;
+            let snapshot = handle.backend.snapshot().await;
             let states = handle.backend.agent_states(false).await;
             match (snapshot, states) {
                 (Ok(snapshot), Ok(states)) => {
@@ -2651,12 +2895,19 @@ impl App {
 
         {
             let backend_id = handle.id.0;
+            let sequence = handle.refresh_sequence.clone();
             let backend = handle.backend.clone();
             let mut feed = backend.change_feed();
             let tx = self.event_loop.sender();
             tasks.push(tokio::spawn(async move {
                 while feed.changed().await {
-                    if !fetch_and_send_backend_change(backend_id, backend.clone(), tx.clone()).await
+                    if !fetch_and_send_backend_change(
+                        sequence.clone(),
+                        backend_id,
+                        backend.clone(),
+                        tx.clone(),
+                    )
+                    .await
                     {
                         break;
                     }
@@ -2676,7 +2927,78 @@ impl App {
     pub(super) fn spawn_backend_view_refresh(&self, id: BackendId) {
         let backend = self.backend_arc(id);
         let tx = self.event_loop.sender();
-        tokio::spawn(fetch_and_send_backend_change(id.0, backend, tx));
+        if let Some(handle) = self.backends.iter().find(|h| h.id == id) {
+            tokio::spawn(fetch_and_send_backend_change(
+                handle.refresh_sequence.clone(),
+                id.0,
+                backend,
+                tx,
+            ));
+        }
+    }
+
+    /// Refresh the sessions actually viewed during an attach, including switcher visits.
+    pub(super) async fn refresh_after_attach(
+        &mut self,
+        attached_backend: BackendId,
+        viewed: &HashSet<String>,
+    ) {
+        let viewed_ids: HashSet<SessionId> = self
+            .view_for(attached_backend)
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|s| {
+                viewed
+                    .iter()
+                    .any(|n| s.tmux_session_name == n.strip_suffix("-sh").unwrap_or(n))
+            })
+            .map(|s| s.session_id)
+            .collect();
+        if !viewed_ids.is_empty() {
+            // The service loop runs during the attach and may have
+            // flagged a watched session unread when it went idle.
+            // Clear unread for everything we actually saw — the
+            // operator watched those turns finish.
+            let backend = self.backend_arc(attached_backend);
+            for id in &viewed_ids {
+                let _ = backend.mark_read(*id).await;
+            }
+            if let Some(handle) = self.backends.iter_mut().find(|h| h.id == attached_backend) {
+                let sequence = handle.refresh_sequence.clone();
+                let tx = self.event_loop.sender();
+                // Keep the fresh service read: it advances the shared unread
+                // baseline too. Only its wait moves off the first-frame path.
+                let task = tokio::spawn(async move {
+                    match backend.agent_states(true).await {
+                        Ok(fresh) => {
+                            let states = fresh
+                                .states
+                                .into_iter()
+                                .filter(|(id, _)| viewed_ids.contains(id))
+                                .collect();
+                            // The fresh read has updated the service cache. Older
+                            // cache reads still in flight must not overwrite it.
+                            let revision =
+                                sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(
+                                    StateUpdate::ViewedAgentStatesUpdated {
+                                        backend_id: attached_backend.0,
+                                        revision,
+                                        states,
+                                    },
+                                ))
+                                .await;
+                        }
+                        Err(e) => debug!("Post-attach agent-state refresh failed: {e}"),
+                    }
+                });
+                handle.feed_tasks.retain(|task| !task.is_finished());
+                handle.feed_tasks.push(task);
+            }
+            self.refresh_list_items().await;
+        }
     }
 
     /// Run the application
@@ -2789,6 +3111,11 @@ impl App {
             self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
         }
 
+        // Pick the workspace to open on (`startup_workspace`, else the one
+        // `tui.json` remembers) before the first build, so the views are
+        // scoped from the first frame.
+        self.apply_startup_workspace();
+
         // Restore last selection from persisted state
         self.refresh_list_items().await;
         self.restore_selection().await;
@@ -2834,9 +3161,10 @@ impl App {
             self.ui_state.should_quit = false;
 
             if let Some((editor, path)) = self.ui_state.editor_command.take() {
-                // Run editor as a foreground process, then return to TUI
-                self.event_loop.stop_input();
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Run editor as a foreground process, then return to TUI. The
+                // editor reads the terminal itself, so wait for our reader to
+                // let go of it first.
+                self.event_loop.stop_input().await;
 
                 info!("Launching editor: {} {}", editor, path.display());
                 let status = std::process::Command::new(&editor).arg(&path).status();
@@ -2852,10 +3180,10 @@ impl App {
                 match self.ui_state.attach_request.take() {
                     Some(request) => {
                         // Stop the input reader BEFORE attaching so it doesn't
-                        // compete for stdin, then flush the key that triggered
-                        // this attach.
-                        self.event_loop.stop_input();
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        // compete for the terminal — `stop_input` resolves only
+                        // once the reader thread has exited — then flush the key
+                        // that triggered this attach.
+                        self.event_loop.stop_input().await;
                         claude_commander_core::tmux::flush_stdin();
 
                         // Pre-warm the conversation runtime so voice input
@@ -2921,8 +3249,17 @@ impl App {
 
                             // Only intercept Ctrl+Z / Alt-r / Alt-V for Claude
                             // (non-shell) panes: SIGTSTP would freeze a shell-
-                            // less pane, and a shell's Ctrl-r must not be
-                            // shadowed. Voice is meaningful only with STT on.
+                            // less pane, a shell's Ctrl-r must not be shadowed,
+                            // and talking *to* the assistant is a thing you do
+                            // from an agent pane.
+                            //
+                            // Dictation is the exception, and deliberately: it
+                            // types into whatever is on screen, so a shell pane
+                            // is a first-class destination for it. Alt-T and the
+                            // listener behind it are therefore gated on `stt`
+                            // alone, not on `is_shell` — otherwise the one place
+                            // dictation is most obviously useful (typing a long
+                            // command) would be the one place it didn't work.
                             let is_shell = matches!(
                                 current,
                                 AttachTarget::Session {
@@ -2942,22 +3279,35 @@ impl App {
                             } else {
                                 Vec::new()
                             };
-                            let (voice_triggers, voice_listener) =
-                                if intercept_ctrl_z && self.config.stt.enabled {
-                                    (
-                                    claude_commander_core::config::keybindings::voice_trigger_bytes(
-                                        &self.config.keybindings,
-                                    ),
-                                    Some(self.conversation.listener.clone()),
+                            let voice_triggers = if intercept_ctrl_z && self.config.stt.enabled {
+                                claude_commander_core::config::keybindings::voice_trigger_bytes(
+                                    &self.config.keybindings,
                                 )
-                                } else {
-                                    (Vec::new(), None)
-                                };
+                            } else {
+                                Vec::new()
+                            };
+                            let dictation_triggers = if self.config.stt.enabled {
+                                claude_commander_core::config::keybindings::dictation_trigger_bytes(
+                                    &self.config.keybindings,
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            // One listener serves both triggers, so it comes up
+                            // whenever either of them can fire — which, since
+                            // dictation works on a shell pane, means whenever
+                            // STT is on at all.
+                            let voice_listener = self
+                                .config
+                                .stt
+                                .enabled
+                                .then(|| self.conversation.listener.clone());
 
                             let cfg = claude_commander_core::tmux::AttachConfig {
                                 editor_triggers,
                                 review_triggers,
                                 voice_triggers,
+                                dictation_triggers,
                                 voice_listener,
                                 recording: self.conversation.recording.clone(),
                                 intercept_ctrl_z,
@@ -2969,7 +3319,22 @@ impl App {
                                 switcher_enabled: true,
                                 session_name: name.clone(),
                                 image_paste,
+                                // The frontend's one long-lived injector: this
+                                // attach installs its own channel into it and
+                                // drops it on the way out, so the transcript
+                                // consumer never has to be told an attach began
+                                // or ended.
+                                injector: Some(self.conversation.injector.clone()),
                             };
+
+                            // Record what the client is about to show, so a
+                            // transcript that arrives during this attach is
+                            // planned against the right pane. The switcher
+                            // updates it again whenever it moves the client in
+                            // place.
+                            self.conversation
+                                .injector
+                                .set_pane(self.pane_info_for(&current));
 
                             let outcome = match self.drive_attach(streams, cfg).await {
                                 Ok(o) => o,
@@ -3104,68 +3469,13 @@ impl App {
 
                         // Flush stdin again after detach to discard stale input,
                         // then restart the input reader (also draining any
-                        // AgentStatesUpdated queued while attached).
+                        // backend updates queued while attached).
                         claude_commander_core::tmux::flush_stdin();
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
 
-                        // Refresh agent state for just the sessions we viewed, via
-                        // the *attached* session's backend, applying the fresh
-                        // states directly. We do NOT clear the whole map: that
-                        // would blank every spinner until the next poll.
-                        // `agent_states(true)` also advances the service loop's
-                        // shared baseline to these observed states, so the loop
-                        // won't re-flag a just-finished session on its next tick.
                         let attached_backend = self.attach_target_backend(&current);
-                        let viewed_ids: HashSet<SessionId> = self
-                            .view_for(attached_backend)
-                            .snapshot
-                            .sessions
-                            .iter()
-                            .filter(|s| {
-                                viewed.iter().any(|n| {
-                                    s.tmux_session_name == n.strip_suffix("-sh").unwrap_or(n)
-                                })
-                            })
-                            .map(|s| s.session_id)
-                            .collect();
-                        if !viewed_ids.is_empty() {
-                            // The service loop runs during the attach and may have
-                            // flagged a watched session unread when it went idle.
-                            // Clear unread for everything we actually saw — the
-                            // operator watched those turns finish.
-                            let backend = self.backend_arc(attached_backend);
-                            for id in &viewed_ids {
-                                let _ = backend.mark_read(*id).await;
-                            }
-                            if let Ok(fresh) = backend.agent_states(true).await {
-                                let refreshed: BTreeMap<SessionId, AgentState> = fresh
-                                    .states
-                                    .into_iter()
-                                    .filter(|(id, _)| viewed_ids.contains(id))
-                                    .collect();
-                                // Fold into the attached backend's cached view —
-                                // the tree reads agent state per-backend from there.
-                                if let Some(handle) =
-                                    self.backends.iter_mut().find(|h| h.id == attached_backend)
-                                {
-                                    state::apply_viewed_session_refresh(
-                                        &mut handle.view.agent_states.states,
-                                        refreshed.clone(),
-                                    );
-                                }
-                                // The local rendered map also feeds local-only
-                                // consumers (commander chip, review-transition
-                                // detection), so keep it in sync for a local attach.
-                                if attached_backend == LOCAL_BACKEND_ID {
-                                    state::apply_viewed_session_refresh(
-                                        &mut self.ui_state.agent_states,
-                                        refreshed,
-                                    );
-                                }
-                            }
-                            self.refresh_list_items().await;
-                        }
+                        self.refresh_after_attach(attached_backend, &viewed).await;
 
                         // Focus the session the user just left so the tree lands
                         // on it (important after the in-session switcher).

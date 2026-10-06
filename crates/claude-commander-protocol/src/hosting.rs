@@ -6,6 +6,7 @@ use std::fmt;
 
 /// Hosted Git provider selected for Commander-wide repository and review operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum CodeHostProvider {
     #[default]
@@ -31,6 +32,7 @@ impl CodeHostProvider {
 
 /// Identity of the provider used for one listing or status snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CodeHost {
     pub provider: CodeHostProvider,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,6 +41,7 @@ pub struct CodeHost {
 
 /// Visibility values shared by GitHub and GitLab repository listings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum RepositoryVisibility {
     Public,
@@ -48,6 +51,7 @@ pub enum RepositoryVisibility {
 
 /// A repository normalized across supported code-host APIs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HostedRepository {
     pub full_name: String,
     pub namespace: String,
@@ -67,6 +71,7 @@ pub struct HostedRepository {
 
 /// Provider-bearing repository list; the host remains observable for an empty list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RepositoryListing {
     pub host: CodeHost,
     pub repositories: Vec<HostedRepository>,
@@ -96,6 +101,7 @@ impl From<crate::github::GithubRepo> for HostedRepository {
 
 /// Where a hosted or ordinary URL clone should come from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CloneSource {
     Github {

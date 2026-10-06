@@ -31,6 +31,7 @@ claude-commander-viewmodel = { path = "../claude-commander-viewmodel" }
 # Async runtime
 tokio = { workspace = true }
 futures = "0.3"
+notify = "8.2"
 
 # No clap: defining a CLI is a binary's job, so the clap tree and the CLI
 # reference generated from it live in `claude-commander` (and the server's own
@@ -58,8 +59,9 @@ ratatui-core = { version = "0.1", features = ["std"] }
 # Key events. NOT a rendering dependency: `config/keybindings.rs` persists
 # crossterm `KeyCode`/`KeyModifiers` in the keybinding map, and `tmux/attach.rs`
 # toggles raw mode, so these stay here after the frontend moved out. Crossterm is
-# pure Rust with no native libraries, and the `event-stream` feature — needed
-# only for the TUI's async `EventStream` — is deliberately NOT enabled here.
+# pure Rust with no native libraries. The `event-stream` feature is enabled
+# nowhere in the workspace: the TUI reads the terminal with the synchronous
+# `poll`/`read` pair on a thread it owns (`claude-commander-tui/src/event.rs`).
 crossterm = "0.29"
 
 # Diff view-model and layout engine: unified-diff parsing, logical rows,
@@ -186,7 +188,7 @@ default = ["audio", "clipboard"]
 audio = ["dep:rodio", "dep:cpal", "dep:hound"]
 clipboard = ["dep:arboard"]
 # Exposes test scaffolding (`backend::mock::MockBackend`,
-# `api::workspace_snapshot_from_state`) to OTHER crates' tests. A `#[cfg(test)]`
+# `api::snapshot_from_state`) to OTHER crates' tests. A `#[cfg(test)]`
 # item is invisible across a crate boundary, and `claude-commander-tui`'s tests
 # need both — so they are gated on `any(test, feature = "test-support")` instead.
 # Enable it only from a `[dev-dependencies]` entry: it is off by default, so
@@ -195,6 +197,10 @@ clipboard = ["dep:arboard"]
 test-support = []
 
 [dev-dependencies]
+# Itself, with `test-support`: `tests/` is a separate crate, so `cfg(test)` does
+# not reach core from there, and its fixtures need `git::fixture` (git that never
+# signs, whatever the developer's global config says).
+claude-commander-core = { path = ".", default-features = false, features = ["test-support"] }
 # Property-based testing
 proptest = "1.11"
 # Async test utilities

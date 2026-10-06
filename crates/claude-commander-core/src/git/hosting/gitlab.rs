@@ -10,7 +10,7 @@ use crate::git::bounded::{self, Bounded};
 use crate::git::{ChecksStatus, EnrichedPrInfo, PrCheckResult, PrInfo, PrLabel, PrState};
 
 pub async fn is_available() -> bool {
-    let mut cmd = Command::new("glab");
+    let mut cmd = crate::git::spawn::detached("glab");
     cmd.arg("version").env("GLAB_NO_PROMPT", "1");
     available_from(cmd).await
 }
@@ -76,7 +76,7 @@ async fn repositories_from(
 
 /// Build the GitLab project-membership query confirmed by the glab 1.113.0 help receipt.
 pub(super) fn api_projects_command(hostname: Option<&str>) -> Command {
-    let mut cmd = Command::new("glab");
+    let mut cmd = crate::git::spawn::detached("glab");
     cmd.args([
         "api",
         "projects",
@@ -172,7 +172,7 @@ fn parse_project_stream(output: &str) -> Result<Vec<HostedRepository>> {
 }
 
 fn merge_requests_command(repo_path: &std::path::Path, branch: &str) -> Command {
-    let mut cmd = Command::new("glab");
+    let mut cmd = crate::git::spawn::detached("glab");
     cmd.args([
         "api",
         "projects/:fullpath/merge_requests",
@@ -296,7 +296,7 @@ pub async fn fetch_enriched_review(
 }
 
 fn enriched_review_command(repo_path: &std::path::Path, number: u32) -> Command {
-    let mut cmd = Command::new("glab");
+    let mut cmd = crate::git::spawn::detached("glab");
     cmd.args([
         "api",
         &format!("projects/:fullpath/merge_requests/{number}"),
@@ -372,7 +372,7 @@ pub async fn try_retarget_review_base(
 }
 
 fn retarget_review_command(repo_path: &std::path::Path, number: u32, new_base: &str) -> Command {
-    let mut cmd = Command::new("glab");
+    let mut cmd = crate::git::spawn::detached("glab");
     cmd.args([
         "mr",
         "update",

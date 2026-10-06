@@ -1,6 +1,15 @@
 //! Settings modal: row building, rendering, editing, and key handling.
 
+use super::colour_picker::PickerOutcome;
 use super::*;
+use claude_commander_core::config::theme::ThemeOverrides;
+
+/// Shown in the Server tab's Bearer Token row in place of the token itself, which
+/// is operator-equivalent and must not be on screen during a screen-share. Also
+/// what `apply_settings_edit` recognises as "submitted unchanged", so the two
+/// cannot drift apart.
+const TOKEN_SET_PLACEHOLDER: &str = "(set)";
+const TOKEN_UNSET_PLACEHOLDER: &str = "(not set \u{2014} generated on first serve)";
 
 impl App {
     /// Refresh the cached input-device list (id + friendly label) backing the
@@ -243,17 +252,57 @@ impl App {
                     ),
                 ])
             }
-            SettingsTab::Conversation => {
+            SettingsTab::Voice => {
+                // Three headed groups, in the order a reader goes looking:
+                // speech coming in, speech going out, and the conversation agent
+                // that joins the two. The grouping is PRESENTATION ONLY — the
+                // `[stt]` and `[conversation]` TOML tables and every `field_key`
+                // below are persisted shapes and stay exactly where they are, so
+                // a config file written before this split still loads and a
+                // settings edit still lands in the same table. What changed is
+                // which heading a row is drawn under, nothing more. (Note the
+                // split crosses the tables: "Text-to-Speech" and "Conversation
+                // Mode" are both `[conversation]` fields, because "is this about
+                // the voice or about the agent?" is the question a reader has,
+                // and "which table is it in?" is not.)
+                //
+                // The STT labels drop their "STT " prefix: the group heading now
+                // carries that, and "Base URL" under Transcription cannot be
+                // confused with "Base URL" under Text-to-Speech.
                 let c = &self.config.conversation;
                 let s = &self.config.stt;
-                vec![
-                    SettingsRow::toggle(
-                        "Enable Conversation Mode",
-                        c.enabled,
-                        "conversation_enabled",
+                with_section_spacers(vec![
+                    SettingsRow::header("Transcription"),
+                    SettingsRow::toggle("Enable Voice Input (STT)", s.enabled, "stt_enabled"),
+                    SettingsRow::text("Base URL", s.base_url.clone(), "stt_base_url"),
+                    SettingsRow::text("Model", s.model.clone(), "stt_model"),
+                    SettingsRow::text(
+                        "Language",
+                        s.language.clone().unwrap_or_else(|| "(auto)".into()),
+                        "stt_language",
                     ),
-                    SettingsRow::text("Assistant Name", c.name.clone(), "conversation_name"),
-                    SettingsRow::text("TTS Base URL", c.base_url.clone(), "conversation_base_url"),
+                    SettingsRow::text(
+                        "Prompt",
+                        s.prompt.clone().unwrap_or_else(|| "(none)".into()),
+                        "stt_prompt",
+                    ),
+                    SettingsRow::text("Microphone", self.input_device_label(), "stt_input_device"),
+                    SettingsRow::toggle(
+                        if self.pause_media_needs_restart() {
+                            "Pause Media While Recording (restart to apply)"
+                        } else {
+                            "Pause Media While Recording"
+                        },
+                        s.pause_media,
+                        "stt_pause_media",
+                    ),
+                    SettingsRow::text(
+                        "Dictation Submit",
+                        s.dictation_submit.label().to_string(),
+                        "stt_dictation_submit",
+                    ),
+                    SettingsRow::header("Text-to-Speech"),
+                    SettingsRow::text("Base URL", c.base_url.clone(), "conversation_base_url"),
                     SettingsRow::text("Model", c.model.clone(), "conversation_model"),
                     SettingsRow::text(
                         "Voice",
@@ -272,33 +321,46 @@ impl App {
                         c.speak_scope.label().to_string(),
                         "conversation_speak_scope",
                     ),
-                    // Speech-to-text (voice input, Alt-V).
-                    SettingsRow::toggle("Enable Voice Input (STT)", s.enabled, "stt_enabled"),
-                    SettingsRow::text("STT Base URL", s.base_url.clone(), "stt_base_url"),
-                    SettingsRow::text("STT Model", s.model.clone(), "stt_model"),
-                    SettingsRow::text(
-                        "STT Language",
-                        s.language.clone().unwrap_or_else(|| "(auto)".into()),
-                        "stt_language",
-                    ),
-                    SettingsRow::text(
-                        "STT Prompt",
-                        s.prompt.clone().unwrap_or_else(|| "(none)".into()),
-                        "stt_prompt",
-                    ),
-                    SettingsRow::text(
-                        "STT Microphone",
-                        self.input_device_label(),
-                        "stt_input_device",
-                    ),
+                    SettingsRow::header("Conversation Mode"),
                     SettingsRow::toggle(
-                        "Pause Media While Recording",
-                        s.pause_media,
-                        "stt_pause_media",
+                        "Enable Conversation Mode",
+                        c.enabled,
+                        "conversation_enabled",
                     ),
-                ]
+                    SettingsRow::text("Assistant Name", c.name.clone(), "conversation_name"),
+                ])
             }
-            SettingsTab::Sections => {
+            SettingsTab::Server => {
+                let s = &self.config.server;
+                let token_display = match &s.token {
+                    Some(_) => TOKEN_SET_PLACEHOLDER,
+                    None => TOKEN_UNSET_PLACEHOLDER,
+                };
+                with_section_spacers(vec![
+                    SettingsRow::header("Embedded Server"),
+                    SettingsRow::toggle("Auto Start With TUI", s.auto_start, "server_auto_start"),
+                    SettingsRow::text("Bind Address", s.bind.to_string(), "server_bind"),
+                    SettingsRow::text("Port", s.port.to_string(), "server_port"),
+                    // The token is deliberately not shown. It is operator-
+                    // equivalent (see docs/configuration.md), the settings modal
+                    // is on screen while screen-sharing, and the STT API key sets
+                    // the same precedent by being absent from this UI entirely.
+                    // Use the palette's "Copy server token" to hand it to a
+                    // client; typing over this row replaces it.
+                    SettingsRow::text("Bearer Token", token_display.to_string(), "server_token"),
+                    SettingsRow::header("Browser Access"),
+                    SettingsRow::text(
+                        "CORS Allowed Origins",
+                        if s.cors_allowed_origins.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            s.cors_allowed_origins.join(", ")
+                        },
+                        "server_cors_allowed_origins",
+                    ),
+                ])
+            }
+            SettingsTab::Sections | SettingsTab::Workspaces => {
                 vec![]
             }
             SettingsTab::Programs => {
@@ -322,65 +384,353 @@ impl App {
                 }
                 with_section_spacers(rows)
             }
-            SettingsTab::Theme => {
-                // Show the current resolved color for each overridable field,
-                // and whether it has a user override.
-                let t = &self.theme;
-                let o = &self.config.theme;
+            SettingsTab::Theme => self.theme_rows(&self.default_theme_scope()),
+        }
+    }
 
-                macro_rules! theme_row {
-                    ($label:expr, $field:ident) => {
-                        SettingsRow::swatch(
-                            $label,
-                            o.$field
-                                .map(|cv| {
-                                    let s = toml::to_string(&cv).unwrap_or_default();
-                                    s.trim().trim_matches('"').to_string()
-                                })
-                                .unwrap_or_else(|| format_color(t.$field)),
-                            stringify!($field),
-                            t.$field,
-                        )
-                    };
+    /// The rows for `state`'s tab — the Theme tab's for its scope.
+    pub(super) fn settings_rows(&self, state: &SettingsState) -> Vec<SettingsRow> {
+        match state.tab {
+            SettingsTab::Theme => self.theme_rows(&state.theme_scope),
+            tab => self.build_settings_rows(tab),
+        }
+    }
+
+    /// The Theme tab for `scope`: a scope row once there are workspaces, a
+    /// reset row for a workspace, then the preset, appearance and every colour
+    /// row. A row with no value of its own in the scope shows the value it
+    /// inherits, dim, with where it comes from — `(usual)` for a workspace
+    /// layered over the usual theme, `(preset)` otherwise.
+    pub(super) fn theme_rows(&self, scope: &ThemeScope) -> Vec<SettingsRow> {
+        let scope = self.effective_theme_scope(scope);
+        let merged = self.merged_workspaces();
+        let none = ThemeOverrides::default();
+        let (o, t) = match &scope {
+            ThemeScope::Usual => (
+                &self.config.theme,
+                crate::theme::Theme::from_overrides(&self.config.theme),
+            ),
+            ThemeScope::Workspace(ws) => (
+                self.config
+                    .workspace_themes
+                    .get(crate::theme::workspace_theme_key(ws.as_deref()))
+                    .unwrap_or(&none),
+                self.workspace_theme(ws.as_deref()),
+            ),
+        };
+        let from = inherited_from(&scope, o);
+
+        let mut rows = Vec::new();
+        if claude_commander_viewmodel::workspace::workspaces_visible(&merged) {
+            rows.push(SettingsRow::text(
+                "Theme for",
+                theme_scope_label(&scope, &merged),
+                "theme_scope",
+            ));
+        }
+        if let ThemeScope::Workspace(ws) = &scope {
+            rows.push(SettingsRow::text(
+                "Reset to usual theme",
+                if self.workspace_theme_customised(ws.as_deref()) {
+                    "customised"
+                } else {
+                    "(already usual)"
+                },
+                "theme_reset",
+            ));
+        }
+        rows.push(SettingsRow::text(
+            "Preset",
+            o.preset.clone().unwrap_or_else(|| match scope {
+                ThemeScope::Usual => "(auto)".into(),
+                ThemeScope::Workspace(_) => "(usual)".into(),
+            }),
+            "preset",
+        ));
+        rows.push(SettingsRow::text(
+            "Appearance",
+            o.appearance
+                .map(|a| a.as_str().to_string())
+                .unwrap_or_else(|| format!("({from})")),
+            "appearance",
+        ));
+
+        macro_rules! theme_row {
+            ($label:expr, $field:ident) => {{
+                let mut row = SettingsRow::swatch(
+                    $label,
+                    // The config spelling (`format_color` writes the same
+                    // forms `ColorValue` serializes to), whether set here or
+                    // inherited.
+                    format_color(o.$field.map_or(t.$field, |cv| cv.0)),
+                    stringify!($field),
+                    t.$field,
+                );
+                if o.$field.is_none() {
+                    row.inherited_from = Some(from);
                 }
+                row
+            }};
+        }
 
-                vec![
-                    SettingsRow::text(
-                        "Preset",
-                        o.preset.clone().unwrap_or_else(|| "(auto)".into()),
-                        "preset",
-                    ),
-                    SettingsRow::text(
-                        "Appearance",
-                        o.appearance
-                            .map(|a| a.as_str().to_string())
-                            .unwrap_or_else(|| "(preset)".into()),
-                        "appearance",
-                    ),
-                    theme_row!("Border Focused", border_focused),
-                    theme_row!("Border Unfocused", border_unfocused),
-                    theme_row!("Selection BG", selection_bg),
-                    theme_row!("Status Running", status_running),
-                    theme_row!("Status Stopped", status_stopped),
-                    theme_row!("Status PR", status_pr),
-                    theme_row!("Status PR Merged", status_pr_merged),
-                    theme_row!("PR Open", pr_open),
-                    theme_row!("PR Draft", pr_draft),
-                    theme_row!("PR Closed", pr_closed),
-                    theme_row!("Text Primary", text_primary),
-                    theme_row!("Text Secondary", text_secondary),
-                    theme_row!("Text Accent", text_accent),
-                    theme_row!("Diff Added", diff_added),
-                    theme_row!("Diff Removed", diff_removed),
-                    theme_row!("Diff Hunk Header", diff_hunk_header),
-                    theme_row!("Diff File Header", diff_file_header),
-                    theme_row!("Modal Info", modal_info),
-                    theme_row!("Modal Warning", modal_warning),
-                    theme_row!("Modal Error", modal_error),
-                    theme_row!("Status Bar BG", status_bar_bg),
-                    theme_row!("Status Bar FG", status_bar_fg),
-                    theme_row!("Status Bar Accent", status_bar_accent),
-                ]
+        rows.extend([
+            theme_row!("Border Focused", border_focused),
+            theme_row!("Border Unfocused", border_unfocused),
+            theme_row!("Selection BG", selection_bg),
+            theme_row!("Status Running", status_running),
+            theme_row!("Status Stopped", status_stopped),
+            theme_row!("Status PR", status_pr),
+            theme_row!("Status PR Merged", status_pr_merged),
+            theme_row!("PR Open", pr_open),
+            theme_row!("PR Draft", pr_draft),
+            theme_row!("PR Closed", pr_closed),
+            theme_row!("Text Primary", text_primary),
+            theme_row!("Text Secondary", text_secondary),
+            theme_row!("Text Accent", text_accent),
+            theme_row!("Diff Added", diff_added),
+            theme_row!("Diff Removed", diff_removed),
+            theme_row!("Diff Hunk Header", diff_hunk_header),
+            theme_row!("Diff File Header", diff_file_header),
+            theme_row!("Modal Info", modal_info),
+            theme_row!("Modal Warning", modal_warning),
+            theme_row!("Modal Error", modal_error),
+            theme_row!("Status Bar BG", status_bar_bg),
+            theme_row!("Status Bar FG", status_bar_fg),
+            theme_row!("Status Bar Accent", status_bar_accent),
+        ]);
+        rows
+    }
+
+    /// The theme `scope` edits, resolved — what its rows show and its colour
+    /// picker offers.
+    fn scope_theme(&self, scope: &ThemeScope) -> crate::theme::Theme {
+        match self.effective_theme_scope(scope) {
+            ThemeScope::Usual => crate::theme::Theme::from_overrides(&self.config.theme),
+            ThemeScope::Workspace(ws) => self.workspace_theme(ws.as_deref()),
+        }
+    }
+
+    /// The overrides `scope` edits, as they stand (an empty table for a
+    /// workspace without an entry).
+    fn scope_overrides(&self, scope: &ThemeScope) -> ThemeOverrides {
+        match self.effective_theme_scope(scope) {
+            ThemeScope::Usual => self.config.theme.clone(),
+            ThemeScope::Workspace(ws) => self
+                .config
+                .workspace_themes
+                .get(crate::theme::workspace_theme_key(ws.as_deref()))
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Edit the overrides `scope` stands for, then rebuild the worn theme and
+    /// persist. A workspace entry edited back to empty is removed, so the
+    /// workspace reads as using the usual theme again.
+    fn edit_theme_overrides(&mut self, scope: &ThemeScope, edit: impl FnOnce(&mut ThemeOverrides)) {
+        match self.effective_theme_scope(scope) {
+            ThemeScope::Usual => edit(&mut self.config.theme),
+            ThemeScope::Workspace(ws) => {
+                let key = crate::theme::workspace_theme_key(ws.as_deref()).to_string();
+                let entry = self.config.workspace_themes.entry(key.clone()).or_default();
+                edit(entry);
+                if *entry == ThemeOverrides::default() {
+                    self.config.workspace_themes.remove(&key);
+                }
+            }
+        }
+        // Also refreshes the project-colour cache so card borders repaint.
+        self.reload_theme();
+        self.persist_config();
+    }
+
+    /// A Preset or Appearance pick in `scope`. The inherit spellings — empty,
+    /// `(auto)`, `(usual)`, `(preset)` — clear the scope's own value.
+    pub(super) fn apply_theme_edit(&mut self, scope: &ThemeScope, field_key: &str, value: &str) {
+        use claude_commander_core::config::theme::AppearanceValue;
+        let inherit = value.is_empty() || matches!(value, "(auto)" | "(usual)" | "(preset)");
+        self.edit_theme_overrides(scope, |o| match field_key {
+            "preset" => o.preset = (!inherit).then(|| value.to_string()),
+            // Anything unparseable is ignored rather than silently flipping
+            // the surface.
+            "appearance" => {
+                o.appearance = if inherit {
+                    None
+                } else if let Some(a) = AppearanceValue::parse(value) {
+                    Some(a)
+                } else {
+                    warn!("Unknown theme appearance: {value:?} (expected dark or light)");
+                    o.appearance
+                };
+            }
+            _ => {}
+        });
+    }
+
+    /// A colour picker's pick on colour row `field_key` in `scope`: `Some`
+    /// sets the scope's own value, `None` clears it so the row inherits.
+    pub(super) fn apply_theme_colour(
+        &mut self,
+        scope: &ThemeScope,
+        field_key: &str,
+        hex: Option<&str>,
+    ) {
+        use claude_commander_core::config::theme::ColorValue;
+        let value = hex
+            .and_then(crate::widgets::parse_hex_color)
+            .map(ColorValue);
+        if hex.is_some() && value.is_none() {
+            warn!("Ignoring an unparseable theme colour {hex:?}");
+            return;
+        }
+        self.edit_theme_overrides(scope, |o| {
+            if let Some(slot) = theme_colour_slot(o, field_key) {
+                *slot = value;
+            }
+        });
+    }
+
+    /// The scope a Theme-tab editor opened on (pinned by `theme_row_enter`),
+    /// if a pick can still land there. A workspace that went while the editor
+    /// was open — a hot reload, a remote snapshot dropping it — discards the
+    /// pick with a toast rather than falling back to the usual theme, which the
+    /// editor's header never named.
+    fn theme_pick_scope(&mut self, scope: &ThemeScope) -> Option<ThemeScope> {
+        if self.effective_theme_scope(scope) == *scope {
+            return Some(scope.clone());
+        }
+        self.toast(match scope {
+            ThemeScope::Workspace(Some(name)) => {
+                format!("{name} is no longer a workspace; nothing was changed")
+            }
+            _ => "Main's own theme is unused with one workspace; nothing was changed".to_string(),
+        });
+        None
+    }
+
+    /// "Reset to usual theme": drop `scope`'s workspace entry.
+    fn reset_workspace_theme(&mut self, scope: &ThemeScope) {
+        let ThemeScope::Workspace(ws) = self.effective_theme_scope(scope) else {
+            return;
+        };
+        let label = self
+            .merged_workspaces()
+            .into_iter()
+            .find(|w| w.name == ws)
+            .map_or_else(|| "Main".to_string(), |w| w.label);
+        let key = crate::theme::workspace_theme_key(ws.as_deref());
+        if self.config.workspace_themes.remove(key).is_none() {
+            self.toast(format!("{label} already uses the usual theme"));
+            return;
+        }
+        self.reload_theme();
+        self.persist_config();
+        self.toast(format!("{label} now uses the usual theme"));
+    }
+
+    /// Open the colour picker on colour row `field_key` in `scope`, fitted to
+    /// the terminal's current size so a key in the same burst as the Enter
+    /// already steps by the drawn row width. `None` if the row is not a colour.
+    fn open_theme_colour_picker(
+        &self,
+        scope: &ThemeScope,
+        field_key: &str,
+    ) -> Option<super::colour_picker::ColourPicker> {
+        let mut overrides = self.scope_overrides(scope);
+        let current = (*theme_colour_slot(&mut overrides, field_key)?)
+            .and_then(|cv| crate::theme::color_to_hex(cv.0));
+        let from = inherited_from(&self.effective_theme_scope(scope), &overrides);
+        let mut picker = super::colour_picker::ColourPicker::open(
+            &self.scope_theme(scope),
+            current.as_deref(),
+            format!("Inherit ({from})"),
+        );
+        self.fit_colour_picker(&mut picker, self.ui_state.terminal_size);
+        Some(picker)
+    }
+
+    /// Fit `picker` to the pane it is drawn in within a frame `area`. Before
+    /// the first frame the size is unknown, so the picker keeps its default.
+    pub(super) fn fit_colour_picker(
+        &self,
+        picker: &mut super::colour_picker::ColourPicker,
+        area: Rect,
+    ) {
+        if area.width > 0 && area.height > 0 {
+            picker.fit_to_width(colour_picker_width(area));
+        }
+    }
+
+    /// Enter on a Theme-tab row outside editing.
+    fn theme_row_enter(&mut self, state: &mut SettingsState) {
+        let Some(row) = state.rows.get(state.selected_row) else {
+            return;
+        };
+        let field_key = row.field_key.clone();
+        let current_value = row.text_value().to_string();
+        // Pinned: the editor opened here names this scope, so its pick applies
+        // to it — or nowhere, if it has gone by then ([`Self::theme_pick_scope`]).
+        let scope = self.effective_theme_scope(&state.theme_scope);
+        state.theme_scope = scope.clone();
+        let picker_of = |options: Vec<PickerOption>, current: &str| {
+            let selected = options.iter().position(|o| o.value == current).unwrap_or(0);
+            SettingsEditing::OptionPicker { options, selected }
+        };
+        match field_key.as_str() {
+            "theme_scope" => {
+                let merged = self.merged_workspaces();
+                let mut options: Vec<PickerOption> = merged
+                    .iter()
+                    .map(|w| PickerOption {
+                        label: w.label.clone(),
+                        value: theme_scope_value(&ThemeScope::Workspace(w.name.clone())),
+                    })
+                    .collect();
+                options.push(PickerOption {
+                    label: theme_scope_label(&ThemeScope::Usual, &merged),
+                    value: theme_scope_value(&ThemeScope::Usual),
+                });
+                state.editing = Some(picker_of(options, &theme_scope_value(&scope)));
+            }
+            "theme_reset" => {
+                self.reset_workspace_theme(&scope);
+                state.rows = self.settings_rows(state);
+            }
+            "preset" => {
+                // A workspace either inherits the usual theme or picks a base
+                // of its own; "(auto)" is the usual theme's inherit spelling.
+                use crate::theme::PRESET_NAMES;
+                let options: Vec<PickerOption> = match scope {
+                    ThemeScope::Usual => PRESET_NAMES
+                        .iter()
+                        .map(|s| PickerOption::plain(*s))
+                        .collect(),
+                    ThemeScope::Workspace(_) => std::iter::once("(usual)")
+                        .chain(PRESET_NAMES.iter().copied().filter(|p| *p != "(auto)"))
+                        .map(PickerOption::plain)
+                        .collect(),
+                };
+                state.editing = Some(picker_of(options, &current_value));
+            }
+            "appearance" => {
+                // Two named values plus "inherit" — a picker rather than free
+                // text, so there is nothing to mistype.
+                let inherit = format!(
+                    "({})",
+                    inherited_from(&scope, &self.scope_overrides(&scope))
+                );
+                let options: Vec<PickerOption> = [inherit.as_str(), "dark", "light"]
+                    .iter()
+                    .map(|s| PickerOption::plain(*s))
+                    .collect();
+                state.editing = Some(picker_of(options, &current_value));
+            }
+            key => {
+                if let Some(picker) = self.open_theme_colour_picker(&scope, key) {
+                    state.editing = Some(SettingsEditing::Colour {
+                        picker: Box::new(picker),
+                    });
+                }
             }
         }
     }
@@ -392,7 +742,12 @@ impl App {
         area: Rect,
         state: &SettingsState,
     ) {
-        let modal_area = modals::centered_rect(75, 85, area);
+        let SettingsAreas {
+            modal: modal_area,
+            content: content_area,
+            body: body_area,
+            footer: footer_area,
+        } = settings_areas(area);
         frame.render_widget(Clear, modal_area);
 
         let block = Block::default()
@@ -400,13 +755,7 @@ impl App {
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
-        let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
-
-        let content_area = inner.inner(Margin {
-            horizontal: 1,
-            vertical: 0,
-        });
 
         if content_area.height < 4 {
             return;
@@ -449,22 +798,10 @@ impl App {
             sep_area,
         );
 
-        // --- Body area (between separator and footer) ---
-        let body_area = Rect {
-            y: content_area.y + 2,
-            height: content_area.height.saturating_sub(4),
-            ..content_area
-        };
-
-        // --- Footer ---
-        let footer_area = Rect {
-            y: content_area.y + content_area.height.saturating_sub(1),
-            height: 1,
-            ..content_area
-        };
-
         if state.tab == SettingsTab::Sections {
             self.render_sections_tab(frame, body_area, footer_area, &state.sections_state);
+        } else if state.tab == SettingsTab::Workspaces {
+            self.render_workspaces_tab(frame, body_area, footer_area, &state.workspaces_state);
         } else if state.tab == SettingsTab::Programs {
             self.render_programs_tab(frame, body_area, footer_area, &state.programs_state);
         } else {
@@ -504,6 +841,38 @@ impl App {
         } else {
             rows_area
         };
+
+        // An open colour picker takes the rows' place: the row it edits (and
+        // for which theme), then the grid and the hex row.
+        if let Some(SettingsEditing::Colour { picker }) = &state.editing {
+            let label = state
+                .rows
+                .get(state.selected_row)
+                .map_or_else(String::new, |r| r.label.clone());
+            let scope = theme_scope_label(
+                &self.effective_theme_scope(&state.theme_scope),
+                &self.merged_workspaces(),
+            );
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        label,
+                        Style::default()
+                            .fg(self.theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {scope}"),
+                        Style::default().fg(self.theme.text_secondary),
+                    ),
+                ]),
+                Line::from(""),
+            ];
+            lines.extend(picker.lines(&self.theme));
+            frame.render_widget(Paragraph::new(lines), rows_area);
+            self.render_settings_footer(frame, footer_area, state);
+            return;
+        }
 
         if state.rows.is_empty() {
             frame.render_widget(
@@ -652,7 +1021,10 @@ impl App {
                             text.clone()
                         }
                     }
-                    SettingsRowKind::Text(text) => text.clone(),
+                    SettingsRowKind::Text(text) => match row.inherited_from {
+                        Some(from) => format!("{text}  ({from})"),
+                        None => text.clone(),
+                    },
                     // Headers `continue` above and never reach the value column.
                     SettingsRowKind::Header => String::new(),
                 };
@@ -662,6 +1034,10 @@ impl App {
                     && state.editing.is_some()
                 {
                     row_style.add_modifier(Modifier::UNDERLINED)
+                } else if row.inherited_from.is_some() {
+                    // Inherited, not set here: dim, so the scope's own values
+                    // stand out.
+                    row_style.fg(self.theme.text_secondary)
                 } else {
                     row_style.fg(self.theme.text_accent)
                 };
@@ -734,6 +1110,7 @@ impl App {
                 Some(SettingsEditing::OptionPicker { .. }) => {
                     "j/k: navigate  Enter: select  Esc: cancel"
                 }
+                Some(SettingsEditing::Colour { picker }) => picker.footer_hint(),
                 _ => "Enter: save  Esc: cancel",
             }
         } else if state.tab == SettingsTab::Keybindings {
@@ -754,7 +1131,7 @@ impl App {
 
     /// Draw the full-height `│` divider between the list and detail panes of a
     /// two-pane settings tab (Sections / Programs).
-    fn render_settings_divider(&self, frame: &mut Frame, divider_area: Rect) {
+    pub(super) fn render_settings_divider(&self, frame: &mut Frame, divider_area: Rect) {
         for row in 0..divider_area.height {
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -1187,7 +1564,7 @@ impl App {
                 }
                 _ => {}
             },
-            SettingsTab::Conversation => match field_key {
+            SettingsTab::Voice => match field_key {
                 "conversation_name" => {
                     let v = value.trim();
                     self.config.conversation.name = if v.is_empty() {
@@ -1253,87 +1630,34 @@ impl App {
                             Some(v.to_string())
                         };
                 }
+                "stt_dictation_submit" => {
+                    // The picker passes the human label; config/tests use tokens.
+                    // An unrecognised value is ignored rather than reset to the
+                    // default, so a typo can't quietly disable a submit policy.
+                    if let Some(policy) =
+                        claude_commander_core::conversation::DictationSubmit::from_token(value)
+                            .or_else(|| {
+                                claude_commander_core::conversation::DictationSubmit::from_label(
+                                    value,
+                                )
+                            })
+                    {
+                        self.config.stt.dictation_submit = policy;
+                        // The dictation consumer captures the policy when the
+                        // listener is built, so a running listener would keep
+                        // applying the old one until the next restart. Rebuild
+                        // it now — the same mechanism the microphone picker
+                        // uses, and a no-op when no listener is running.
+                        self.respawn_listener();
+                    }
+                }
                 _ => {}
             },
             SettingsTab::Theme => {
-                use claude_commander_core::config::theme::{AppearanceValue, ColorValue};
-
-                if field_key == "preset" {
-                    self.config.theme.preset = if value.is_empty() || value == "(auto)" {
-                        None
-                    } else {
-                        Some(value.to_string())
-                    };
-                } else if field_key == "appearance" {
-                    // Clearing it (or typing the placeholder) falls back to
-                    // whatever the preset declares; anything unparseable is
-                    // ignored rather than silently flipping the surface.
-                    self.config.theme.appearance =
-                        if value.is_empty() || value == "(preset)" || value == "(auto)" {
-                            None
-                        } else if let Some(a) = AppearanceValue::parse(value) {
-                            Some(a)
-                        } else {
-                            warn!("Unknown theme appearance: {value:?} (expected dark or light)");
-                            self.config.theme.appearance
-                        };
-                } else {
-                    // Try to parse the value as a ColorValue via TOML
-                    let toml_input = if value.starts_with('#')
-                        || value.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
-                    {
-                        format!("c = \"{value}\"")
-                    } else {
-                        format!("c = {value}")
-                    };
-
-                    #[derive(serde::Deserialize)]
-                    struct Wrap {
-                        c: ColorValue,
-                    }
-
-                    if let Ok(w) = toml::from_str::<Wrap>(&toml_input) {
-                        macro_rules! set_theme_field {
-                            ($($name:ident),*) => {
-                                match field_key {
-                                    $(stringify!($name) => self.config.theme.$name = Some(w.c),)*
-                                    _ => {}
-                                }
-                            };
-                        }
-                        set_theme_field!(
-                            border_focused,
-                            border_unfocused,
-                            selection_bg,
-                            selection_fg,
-                            status_running,
-                            status_stopped,
-                            status_pr,
-                            status_pr_merged,
-                            pr_open,
-                            pr_draft,
-                            pr_closed,
-                            text_primary,
-                            text_secondary,
-                            text_accent,
-                            diff_added,
-                            diff_removed,
-                            diff_hunk_header,
-                            diff_file_header,
-                            diff_context,
-                            modal_info,
-                            modal_warning,
-                            modal_error,
-                            status_bar_bg,
-                            status_bar_fg,
-                            status_bar_accent
-                        );
-                    }
-                }
-
-                // Rebuild theme from updated overrides (also refreshes the
-                // project-colour cache so card borders repaint immediately).
-                self.reload_theme();
+                // The key handler edits the tab's own scope through
+                // `apply_theme_edit`; an unscoped edit is the usual theme's.
+                self.apply_theme_edit(&ThemeScope::Usual, field_key, value);
+                return;
             }
             SettingsTab::Keybindings => {
                 use claude_commander_core::config::keybindings::{BindableAction, KeyBinding};
@@ -1382,8 +1706,70 @@ impl App {
 
                 self.config.keybindings.set_keys_for(action, parsed);
             }
+            SettingsTab::Server => match field_key {
+                "server_bind" => match value.trim().parse::<std::net::IpAddr>() {
+                    Ok(ip) => self.config.server.bind = ip,
+                    Err(_) => {
+                        self.ui_state.status_message = Some((
+                            format!("Not an IP address: {value} (try 127.0.0.1 or 0.0.0.0)"),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                        return;
+                    }
+                },
+                // Port 0 is a legal port that binds an ephemeral one the
+                // operator cannot predict — useless for a client that has to be
+                // pointed at it — so it is refused here.
+                "server_port" => match value.trim().parse::<u16>() {
+                    Ok(p) if p > 0 => self.config.server.port = p,
+                    _ => {
+                        self.ui_state.status_message = Some((
+                            format!("Not a port: {value} (1-65535)"),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                        return;
+                    }
+                },
+                "server_token" => {
+                    let trimmed = value.trim();
+                    // The row renders a placeholder instead of the secret, so
+                    // submitting it unchanged has to mean "leave it alone" rather
+                    // than "set the token to the literal text `(set)`". Matched
+                    // exactly, not by a leading `(`, so a token that happens to
+                    // start with one is still settable.
+                    if trimmed == TOKEN_SET_PLACEHOLDER || trimmed == TOKEN_UNSET_PLACEHOLDER {
+                        return;
+                    }
+                    self.config.server.token = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                }
+                "server_cors_allowed_origins" => {
+                    let trimmed = value.trim();
+                    self.config.server.cors_allowed_origins =
+                        if trimmed.is_empty() || trimmed == "(none)" {
+                            Vec::new()
+                        } else {
+                            trimmed
+                                .split(',')
+                                .map(|o| o.trim().to_string())
+                                .filter(|o| !o.is_empty())
+                                .collect()
+                        };
+                }
+                _ => {
+                    warn!("Unknown server setting: {}", field_key);
+                    return;
+                }
+            },
             SettingsTab::Sections => {
                 // Sections tab handles its own persistence via save_sections_config
+                return;
+            }
+            SettingsTab::Workspaces => {
+                // Workspaces tab propagates its own edits (handle_workspaces_key)
                 return;
             }
             SettingsTab::Programs => {
@@ -1453,6 +1839,7 @@ impl App {
             "stt_enabled" => self.config.stt.enabled = value,
             "stt_pause_media" => self.config.stt.pause_media = value,
             "telemetry_enabled" => self.config.telemetry.enabled = value,
+            "server_auto_start" => self.config.server.auto_start = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
@@ -1473,13 +1860,13 @@ impl App {
     /// Switch the settings modal to the next (`forward`) or previous tab,
     /// rebuilding its rows and resetting the selection to the first selectable
     /// row. The caller restores the modal afterwards.
-    fn switch_settings_tab(&self, state: &mut SettingsState, forward: bool) {
+    pub(super) fn switch_settings_tab(&self, state: &mut SettingsState, forward: bool) {
         state.tab = if forward {
             state.tab.next()
         } else {
             state.tab.prev()
         };
-        state.rows = self.build_settings_rows(state.tab);
+        state.rows = self.settings_rows(state);
         state.selected_row = first_selectable_from(&state.rows, 0);
         // Landing on the Programs tab loads its target's list (local from config,
         // a remote server asynchronously).
@@ -1498,6 +1885,11 @@ impl App {
 
         if state.tab == SettingsTab::Sections {
             self.handle_sections_key(key, state).await;
+            return;
+        }
+
+        if state.tab == SettingsTab::Workspaces {
+            self.handle_workspaces_key(key, state).await;
             return;
         }
 
@@ -1535,7 +1927,7 @@ impl App {
                         self.apply_settings_edit_live(state.tab, &field_key, &val)
                             .await;
                         // Refresh rows after applying
-                        state.rows = self.build_settings_rows(state.tab);
+                        state.rows = self.settings_rows(&state);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Esc => {
@@ -1562,6 +1954,21 @@ impl App {
                         }
                     }
                 }
+                SettingsEditing::Colour { picker } => {
+                    match picker.handle_key(key) {
+                        PickerOutcome::Open => {}
+                        PickerOutcome::Cancel => state.editing = None,
+                        PickerOutcome::Pick(hex) => {
+                            state.editing = None;
+                            let field_key = state.rows[state.selected_row].field_key.clone();
+                            if let Some(scope) = self.theme_pick_scope(&state.theme_scope) {
+                                self.apply_theme_colour(&scope, &field_key, hex.as_deref());
+                            }
+                            state.rows = self.settings_rows(&state);
+                        }
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
                 SettingsEditing::OptionPicker { options, selected } => match key.code {
                     KeyCode::Enter => {
                         // Commit the entry's value (the display label and stored
@@ -1575,6 +1982,20 @@ impl App {
                             chosen
                         };
                         state.editing = None;
+                        if state.tab == SettingsTab::Theme {
+                            if field_key == "theme_scope" {
+                                if let Some(scope) = parse_theme_scope(&val) {
+                                    state.theme_scope = scope;
+                                }
+                            } else if let Some(scope) = self.theme_pick_scope(&state.theme_scope) {
+                                self.apply_theme_edit(&scope, &field_key, &val);
+                            }
+                            state.rows = self.settings_rows(&state);
+                            state.selected_row =
+                                state.selected_row.min(state.rows.len().saturating_sub(1));
+                            self.ui_state.modal = Modal::Settings(state);
+                            return;
+                        }
                         let prev_input_device = self.config.stt.input_device.clone();
                         self.apply_settings_edit_live(state.tab, &field_key, &val)
                             .await;
@@ -1588,7 +2009,7 @@ impl App {
                         {
                             self.respawn_listener();
                         }
-                        state.rows = self.build_settings_rows(state.tab);
+                        state.rows = self.settings_rows(&state);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Esc => {
@@ -1633,7 +2054,7 @@ impl App {
             if let Some(new_val) = new_val {
                 let field_key = state.rows[state.selected_row].field_key.clone();
                 self.apply_bool_setting(&field_key, new_val);
-                state.rows = self.build_settings_rows(state.tab);
+                state.rows = self.settings_rows(&state);
                 self.ui_state.modal = Modal::Settings(state);
                 return;
             }
@@ -1662,6 +2083,10 @@ impl App {
                         self.switch_settings_tab(&mut state, false);
                         self.ui_state.modal = Modal::Settings(state);
                     }
+                    KeyCode::Enter if state.tab == SettingsTab::Theme => {
+                        self.theme_row_enter(&mut state);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
                     KeyCode::Enter => {
                         if !state.rows.is_empty() {
                             let field_key = &state.rows[state.selected_row].field_key;
@@ -1673,39 +2098,27 @@ impl App {
                                 );
                                 state.editing =
                                     Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if state.tab == SettingsTab::Theme && field_key == "preset" {
-                                // Open an inline option picker for theme presets
-                                use crate::theme::PRESET_NAMES;
-                                let options: Vec<PickerOption> = PRESET_NAMES
-                                    .iter()
-                                    .map(|s| PickerOption::plain(*s))
-                                    .collect();
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_value)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if state.tab == SettingsTab::Theme && field_key == "appearance" {
-                                // Two named values plus "inherit the preset" —
-                                // a picker rather than free text, so there is
-                                // nothing to mistype.
-                                let options: Vec<PickerOption> = ["(preset)", "dark", "light"]
-                                    .iter()
-                                    .map(|s| PickerOption::plain(*s))
-                                    .collect();
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_value)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
                             } else if field_key == "conversation_speak_scope" {
                                 // Inline option picker for the speak-scope enum.
                                 use claude_commander_core::conversation::SpeakScope;
                                 let options: Vec<PickerOption> = SpeakScope::ALL
+                                    .iter()
+                                    .map(|s| PickerOption::plain(s.label()))
+                                    .collect();
+                                let current_value = state.rows[state.selected_row].text_value();
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o.value == current_value)
+                                    .unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "stt_dictation_submit" {
+                                // Inline option picker for the dictation submit
+                                // policy — three named values, so a picker
+                                // rather than free text (same shape as the
+                                // speak-scope row above).
+                                use claude_commander_core::conversation::DictationSubmit;
+                                let options: Vec<PickerOption> = DictationSubmit::ALL
                                     .iter()
                                     .map(|s| PickerOption::plain(s.label()))
                                     .collect();
@@ -1790,7 +2203,7 @@ impl App {
             KeyCode::Esc => {
                 // Clear the filter and restore the full grouped list.
                 state.search = None;
-                state.rows = self.build_settings_rows(state.tab);
+                state.rows = self.settings_rows(&state);
                 state.selected_row = first_selectable_from(&state.rows, 0);
             }
             KeyCode::Enter => {
@@ -2152,7 +2565,9 @@ impl App {
             editing: None,
             rows,
             sections_state: SectionsState::default(),
+            workspaces_state: WorkspacesState::default(),
             programs_state,
+            theme_scope: self.default_theme_scope(),
             search: None,
         });
     }
@@ -3113,9 +3528,46 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
     desired.min(cap)
 }
 
+/// Where the settings modal draws within a frame `area`. Shared by the
+/// renderer and by state that must agree with what it draws (the colour
+/// picker's grid width).
+pub(super) struct SettingsAreas {
+    pub modal: Rect,
+    /// Inside the border and a one-column side margin.
+    pub content: Rect,
+    /// Between the tab bar's separator and the footer.
+    pub body: Rect,
+    pub footer: Rect,
+}
+
+pub(super) fn settings_areas(area: Rect) -> SettingsAreas {
+    let modal = modals::centered_rect(75, 85, area);
+    let content = Block::default()
+        .borders(Borders::ALL)
+        .inner(modal)
+        .inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+    SettingsAreas {
+        modal,
+        content,
+        body: Rect {
+            y: content.y + 2,
+            height: content.height.saturating_sub(4),
+            ..content
+        },
+        footer: Rect {
+            y: content.y + content.height.saturating_sub(1),
+            height: 1,
+            ..content
+        },
+    }
+}
+
 /// Top scroll offset that keeps `selected` visible in a window `visible` rows
 /// tall: scroll only once the selection passes the bottom edge.
-fn list_scroll_offset(selected: usize, visible: usize) -> usize {
+pub(super) fn list_scroll_offset(selected: usize, visible: usize) -> usize {
     if selected >= visible {
         selected - visible + 1
     } else {
@@ -3223,6 +3675,101 @@ pub(super) fn truncate_str(s: &str, max: usize) -> String {
     } else {
         "…".to_string()
     }
+}
+
+/// Where `scope`'s rows inherit from when they have no value of their own:
+/// a workspace without a preset of its own layers over the usual theme; the
+/// usual theme, and a workspace with its own preset, over that preset.
+fn inherited_from(scope: &ThemeScope, overrides: &ThemeOverrides) -> &'static str {
+    match scope {
+        ThemeScope::Workspace(_) if !crate::theme::entry_sets_preset(overrides) => "usual",
+        _ => "preset",
+    }
+}
+
+/// How the scope row reads.
+fn theme_scope_label(
+    scope: &ThemeScope,
+    merged: &[claude_commander_viewmodel::workspace::MergedWorkspace],
+) -> String {
+    match scope {
+        ThemeScope::Usual => "Usual theme (all workspaces)".to_string(),
+        ThemeScope::Workspace(name) => merged
+            .iter()
+            .find(|w| &w.name == name)
+            .map_or_else(|| name.clone().unwrap_or_default(), |w| w.label.clone()),
+    }
+}
+
+/// A scope as a picker value. The `@` spellings cannot collide with the
+/// `ws:`-prefixed names.
+fn theme_scope_value(scope: &ThemeScope) -> String {
+    match scope {
+        ThemeScope::Usual => "@usual".to_string(),
+        ThemeScope::Workspace(None) => "@main".to_string(),
+        ThemeScope::Workspace(Some(name)) => format!("ws:{name}"),
+    }
+}
+
+/// The inverse of [`theme_scope_value`].
+fn parse_theme_scope(value: &str) -> Option<ThemeScope> {
+    match value {
+        "@usual" => Some(ThemeScope::Usual),
+        "@main" => Some(ThemeScope::Workspace(None)),
+        other => other
+            .strip_prefix("ws:")
+            .map(|name| ThemeScope::Workspace(Some(name.to_string()))),
+    }
+}
+
+/// The colour field of `overrides` a Theme-tab row edits, by its field key.
+/// `None` for a key that is not a colour row (`preset`, `appearance`, …).
+fn theme_colour_slot<'a>(
+    overrides: &'a mut ThemeOverrides,
+    field_key: &str,
+) -> Option<&'a mut Option<claude_commander_core::config::theme::ColorValue>> {
+    macro_rules! slot {
+        ($($name:ident),* $(,)?) => {
+            match field_key {
+                $(stringify!($name) => Some(&mut overrides.$name),)*
+                _ => None,
+            }
+        };
+    }
+    slot!(
+        border_focused,
+        border_unfocused,
+        selection_bg,
+        selection_fg,
+        status_creating,
+        status_running,
+        status_stopped,
+        status_pr,
+        status_pr_merged,
+        pr_open,
+        pr_draft,
+        pr_closed,
+        text_primary,
+        text_secondary,
+        text_accent,
+        diff_added,
+        diff_removed,
+        diff_hunk_header,
+        diff_file_header,
+        diff_context,
+        modal_info,
+        modal_warning,
+        modal_error,
+        status_bar_bg,
+        status_bar_fg,
+        status_bar_accent,
+    )
+}
+
+/// How wide the colour picker's pane is when the settings modal is drawn in a
+/// frame `area`: the whole settings body.
+pub(super) fn colour_picker_width(area: Rect) -> u16 {
+    settings_areas(area).body.width
 }
 
 /// Format a ratatui Color for display in the settings modal.
@@ -3449,23 +3996,32 @@ mod tests {
     }
 
     #[test]
-    fn settings_tab_cycle_includes_conversation() {
-        assert_eq!(SettingsTab::ALL.len(), 6);
-        assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
+    fn settings_tab_cycle_includes_voice() {
+        assert_eq!(SettingsTab::ALL.len(), 8);
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Workspaces));
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Voice));
         assert!(SettingsTab::ALL.contains(&SettingsTab::Programs));
-        assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
-        assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
-        // Programs sits after Sections and wraps back to General.
-        assert_eq!(SettingsTab::Sections.next(), SettingsTab::Programs);
-        assert_eq!(SettingsTab::Programs.next(), SettingsTab::General);
-        assert_eq!(SettingsTab::General.prev(), SettingsTab::Programs);
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Server));
+        assert_eq!(SettingsTab::General.next(), SettingsTab::Voice);
+        assert_eq!(SettingsTab::Voice.prev(), SettingsTab::General);
+        assert_eq!(SettingsTab::Voice.next(), SettingsTab::Keybindings);
+        // Server sits last, after Programs, and wraps back to General.
+        assert_eq!(SettingsTab::Sections.next(), SettingsTab::Workspaces);
+        assert_eq!(SettingsTab::Workspaces.next(), SettingsTab::Programs);
+        assert_eq!(SettingsTab::Programs.prev(), SettingsTab::Workspaces);
+        assert_eq!(SettingsTab::Programs.next(), SettingsTab::Server);
+        assert_eq!(SettingsTab::Server.next(), SettingsTab::General);
+        assert_eq!(SettingsTab::General.prev(), SettingsTab::Server);
+        assert_eq!(SettingsTab::Server.prev(), SettingsTab::Programs);
         // A full forward cycle returns to the start.
         let mut t = SettingsTab::General;
         for _ in 0..SettingsTab::ALL.len() {
             t = t.next();
         }
         assert_eq!(t, SettingsTab::General);
-        assert_eq!(SettingsTab::Conversation.label(), "Conversation");
+        // The tab is named for the feature, not for the `[conversation]` TOML
+        // table it grew out of: it holds speech in as well as speech out.
+        assert_eq!(SettingsTab::Voice.label(), "Voice");
         assert_eq!(SettingsTab::Programs.label(), "Programs");
     }
 }
