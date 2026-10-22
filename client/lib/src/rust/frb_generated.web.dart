@@ -14,9 +14,12 @@ import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
 import 'api/workspace.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_web.dart';
 import 'package:uuid/uuid.dart';
 
@@ -68,6 +71,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApplyResultKind dco_decode_apply_result_kind(dynamic raw);
 
   @protected
+  ApprovalRule dco_decode_approval_rule(dynamic raw);
+
+  @protected
+  ApprovalRuleKind dco_decode_approval_rule_kind(dynamic raw);
+
+  @protected
+  ApprovalStatus dco_decode_approval_status(dynamic raw);
+
+  @protected
+  ApprovalSummary dco_decode_approval_summary(dynamic raw);
+
+  @protected
   AttachKind dco_decode_attach_kind(dynamic raw);
 
   @protected
@@ -75,6 +90,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
+  ApprovalSummary dco_decode_box_autoadd_approval_summary(dynamic raw);
+
+  @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw);
 
   @protected
   CloneJobDto dco_decode_box_autoadd_clone_job_dto(dynamic raw);
@@ -223,6 +244,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<AgentStateEntryDto> dco_decode_list_agent_state_entry_dto(dynamic raw);
 
   @protected
+  List<ApprovalRule> dco_decode_list_approval_rule(dynamic raw);
+
+  @protected
   List<BranchInfo> dco_decode_list_branch_info(dynamic raw);
 
   @protected
@@ -307,6 +331,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw);
 
   @protected
+  ApprovalSummary? dco_decode_opt_box_autoadd_approval_summary(dynamic raw);
+
+  @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
+
+  @protected
   CloneJobDto? dco_decode_opt_box_autoadd_clone_job_dto(dynamic raw);
 
   @protected
@@ -346,6 +376,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WorkspaceDef? dco_decode_opt_box_autoadd_workspace_def(dynamic raw);
+
+  @protected
+  List<ApprovalRule>? dco_decode_opt_list_approval_rule(dynamic raw);
 
   @protected
   PrState dco_decode_pr_state(dynamic raw);
@@ -504,6 +537,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ApplyResultKind sse_decode_apply_result_kind(SseDeserializer deserializer);
 
   @protected
+  ApprovalRule sse_decode_approval_rule(SseDeserializer deserializer);
+
+  @protected
+  ApprovalRuleKind sse_decode_approval_rule_kind(SseDeserializer deserializer);
+
+  @protected
+  ApprovalStatus sse_decode_approval_status(SseDeserializer deserializer);
+
+  @protected
+  ApprovalSummary sse_decode_approval_summary(SseDeserializer deserializer);
+
+  @protected
   AttachKind sse_decode_attach_kind(SseDeserializer deserializer);
 
   @protected
@@ -511,6 +556,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
+  ApprovalSummary sse_decode_box_autoadd_approval_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer);
 
   @protected
   CloneJobDto sse_decode_box_autoadd_clone_job_dto(
@@ -687,6 +740,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<ApprovalRule> sse_decode_list_approval_rule(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<BranchInfo> sse_decode_list_branch_info(SseDeserializer deserializer);
 
   @protected
@@ -799,6 +857,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
 
   @protected
+  ApprovalSummary? sse_decode_opt_box_autoadd_approval_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
   CloneJobDto? sse_decode_opt_box_autoadd_clone_job_dto(
     SseDeserializer deserializer,
   );
@@ -856,6 +922,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WorkspaceDef? sse_decode_opt_box_autoadd_workspace_def(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ApprovalRule>? sse_decode_opt_list_approval_rule(
     SseDeserializer deserializer,
   );
 
@@ -1042,6 +1113,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_approval_rule(ApprovalRule self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_approval_rule_kind(
+    ApprovalRuleKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_approval_status(
+    ApprovalStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_approval_summary(
+    ApprovalSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_attach_kind(AttachKind self, SseSerializer serializer);
 
   @protected
@@ -1052,6 +1144,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DateTime self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_approval_summary(
+    ApprovalSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_clone_job_dto(
@@ -1282,6 +1383,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_approval_rule(
+    List<ApprovalRule> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_branch_info(
     List<BranchInfo> self,
     SseSerializer serializer,
@@ -1441,6 +1548,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_approval_summary(
+    ApprovalSummary? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_clone_job_dto(
     CloneJobDto? self,
     SseSerializer serializer,
@@ -1509,6 +1625,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_workspace_def(
     WorkspaceDef? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_approval_rule(
+    List<ApprovalRule>? self,
     SseSerializer serializer,
   );
 

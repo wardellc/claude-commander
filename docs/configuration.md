@@ -973,6 +973,53 @@ All fields are optional; a section matches when **every declared field** matches
 | `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
 | `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit`, warning-coloured at the limit and error-coloured over it. Never blocks creation. |
 
+### Approval requirements
+
+The optional `approval_status` section predicate accepts a scalar or any-of array:
+`"unapproved"`, `"needs_code_owner"`, `"needs_approvals"`, `"approved"`,
+`"not_required"`, `"blocked"`, or `"unknown"`. Existing `review_decision` conditions
+keep their meaning.
+
+`unapproved` means no approvals with outstanding requirements. Partial approval
+still needing a Code Owner is `needs_code_owner`; another required person, group,
+or numerical shortfall is `needs_approvals`. Code Owner shortfalls take precedence
+when both apply. `approved` requires a host-confirmed approval decision; it does
+not imply passing CI or conflict-free merging. `not_required` means the host
+confirmed no approvals are required and none are present. Blocking review
+feedback is `blocked`. Missing, unsupported, inconsistent, or stale observations
+match only `unknown`; a session without a PR/MR also has unknown approval status.
+
+GitLab provides per-rule details where the account's edition and permissions
+allow it. An unavailable rule-details endpoint can leave the reason unknown even
+when the aggregate decision is known. GitHub uses its aggregate review decision
+and counts distinct current approving reviewers; missing required counts and
+Code Owner reasons remain unknown rather than being inferred from review requests.
+
+```toml
+[[sections]]
+name = "Needs Code Owner"
+pr_state = "open"
+approval_status = "needs_code_owner"
+
+[[sections]]
+name = "Approved"
+pr_state = "open"
+is_draft = false
+approval_status = "approved"
+```
+
+Session list/detail API responses expose an optional `approval_summary` with
+`approvals_received`, `approvals_required`, and `approvals_remaining`, optional
+per-rule counts and satisfaction, an observation timestamp, and a `stale` flag.
+Unknown counts are `null`, not zero. Received totals can include approvals that
+do not satisfy a required rule, and rules can overlap: neither subtraction of
+aggregate counts nor summing rules reliably determines approval status.
+GitHub required/remaining counts and per-rule details are currently unavailable.
+If more than 100 GitHub opinionated reviews exist, the received count is also
+unknown rather than a truncated total. Counts are available to clients for a
+future display; existing section movement remains forward-only. Withdrawing an
+approval does not automatically move a session back from an Approved section.
+
 ### Process order and forward-only
 
 Config order is the pipeline. A session's section is re-evaluated on every PR refresh, but the scan **only considers sections at or after the session's current position** — auto never moves a session backwards. This keeps `"Needs Review"` sticky when a reviewer removes the label without leaving other signals; the session doesn't slide back to `"In Progress"`.

@@ -22,6 +22,7 @@ pub use claude_commander_protocol::api::{
 };
 pub use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
+pub use claude_commander_protocol::approval::{ApprovalStatus, ApprovalRuleKind, ApprovalRule, ApprovalSummary};
 pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
 pub use claude_commander_protocol::workspace::WorkspaceDef;
 pub use claude_commander_protocol::ws::AttachKind;
@@ -67,6 +68,36 @@ pub enum _ReviewDecision {
     ChangesRequested,
 }
 
+#[frb(mirror(ApprovalStatus))]
+pub enum _ApprovalStatus { Unapproved, NeedsCodeOwner, NeedsApprovals, Approved, NotRequired, Blocked, Unknown }
+
+#[frb(mirror(ApprovalRuleKind))]
+pub enum _ApprovalRuleKind { AnyApprover, Regular, CodeOwner, ReportApprover, Other }
+
+#[frb(mirror(ApprovalRule))]
+pub struct _ApprovalRule {
+    pub id: String,
+    pub name: String,
+    pub kind: ApprovalRuleKind,
+    pub approvals_required: Option<u32>,
+    pub approvals_received: Option<u32>,
+    pub approvals_remaining: Option<u32>,
+    pub satisfied: Option<bool>,
+}
+
+#[frb(mirror(ApprovalSummary))]
+pub struct _ApprovalSummary {
+    pub status: ApprovalStatus,
+    pub requirements_satisfied: Option<bool>,
+    pub approvals_received: Option<u32>,
+    pub approvals_required: Option<u32>,
+    pub approvals_remaining: Option<u32>,
+    pub rules: Option<Vec<ApprovalRule>>,
+    pub observed_at: DateTime<Utc>,
+    pub stale: bool,
+    pub head_sha: Option<String>,
+}
+
 #[frb(mirror(SessionInfo))]
 pub struct _SessionInfo {
     pub id: String,
@@ -84,6 +115,7 @@ pub struct _SessionInfo {
     pub pr_draft: bool,
     pub pr_labels: Vec<String>,
     pub review_decision: Option<ReviewDecision>,
+    pub approval_summary: Option<ApprovalSummary>,
     pub pr_reviewers: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub unread: bool,

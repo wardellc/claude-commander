@@ -206,7 +206,17 @@ pub async fn check_review_for_branch(
     let Ok(json) = String::from_utf8(output.stdout) else {
         return PrCheckResult::FetchFailed;
     };
-    parse_merge_request_list(&json, branch_owned_since)
+    let mut result = parse_merge_request_list(&json, branch_owned_since);
+    if let PrCheckResult::Found(info) = &mut result {
+        info.approval_summary = crate::git::approval::gitlab_approvals(
+            repo_path,
+            info.number,
+            info.head_sha.as_deref(),
+        )
+        .await
+        .map(Box::new);
+    }
+    result
 }
 
 fn parse_merge_request_list(json: &str, owned_since: DateTime<Utc>) -> PrCheckResult {
@@ -262,6 +272,8 @@ fn parse_merge_request(value: &serde_json::Value) -> Option<PrInfo> {
     reviewers.sort();
     reviewers.dedup();
     Some(PrInfo {
+        approval_summary: None,
+        head_sha: value["sha"].as_str().map(str::to_owned),
         number,
         url: value["web_url"].as_str()?.to_owned(),
         state,

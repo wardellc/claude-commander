@@ -11,11 +11,14 @@ import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
 import 'api/workspace.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
 import 'frb_generated.io.dart'
     if (dart.library.js_interop) 'frb_generated.web.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
@@ -2979,6 +2982,54 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApprovalRule dco_decode_approval_rule(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return ApprovalRule(
+      id: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      kind: dco_decode_approval_rule_kind(arr[2]),
+      approvalsRequired: dco_decode_opt_box_autoadd_u_32(arr[3]),
+      approvalsReceived: dco_decode_opt_box_autoadd_u_32(arr[4]),
+      approvalsRemaining: dco_decode_opt_box_autoadd_u_32(arr[5]),
+      satisfied: dco_decode_opt_box_autoadd_bool(arr[6]),
+    );
+  }
+
+  @protected
+  ApprovalRuleKind dco_decode_approval_rule_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ApprovalRuleKind.values[raw as int];
+  }
+
+  @protected
+  ApprovalStatus dco_decode_approval_status(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ApprovalStatus.values[raw as int];
+  }
+
+  @protected
+  ApprovalSummary dco_decode_approval_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return ApprovalSummary(
+      status: dco_decode_approval_status(arr[0]),
+      requirementsSatisfied: dco_decode_opt_box_autoadd_bool(arr[1]),
+      approvalsReceived: dco_decode_opt_box_autoadd_u_32(arr[2]),
+      approvalsRequired: dco_decode_opt_box_autoadd_u_32(arr[3]),
+      approvalsRemaining: dco_decode_opt_box_autoadd_u_32(arr[4]),
+      rules: dco_decode_opt_list_approval_rule(arr[5]),
+      observedAt: dco_decode_Chrono_Utc(arr[6]),
+      stale: dco_decode_bool(arr[7]),
+      headSha: dco_decode_opt_String(arr[8]),
+    );
+  }
+
+  @protected
   AttachKind dco_decode_attach_kind(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return AttachKind.values[raw as int];
@@ -2994,6 +3045,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_Chrono_Utc(raw);
+  }
+
+  @protected
+  ApprovalSummary dco_decode_box_autoadd_approval_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_approval_summary(raw);
+  }
+
+  @protected
+  bool dco_decode_box_autoadd_bool(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as bool;
   }
 
   @protected
@@ -3448,6 +3511,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<ApprovalRule> dco_decode_list_approval_rule(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_approval_rule).toList();
+  }
+
+  @protected
   List<BranchInfo> dco_decode_list_branch_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_branch_info).toList();
@@ -3636,6 +3705,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApprovalSummary? dco_decode_opt_box_autoadd_approval_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_approval_summary(raw);
+  }
+
+  @protected
+  bool? dco_decode_opt_box_autoadd_bool(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_bool(raw);
+  }
+
+  @protected
   CloneJobDto? dco_decode_opt_box_autoadd_clone_job_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_clone_job_dto(raw);
@@ -3713,6 +3794,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WorkspaceDef? dco_decode_opt_box_autoadd_workspace_def(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_workspace_def(raw);
+  }
+
+  @protected
+  List<ApprovalRule>? dco_decode_opt_list_approval_rule(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_list_approval_rule(raw);
   }
 
   @protected
@@ -3976,8 +4063,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionInfo dco_decode_session_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 28)
-      throw Exception('unexpected arr length: expect 28 but see ${arr.length}');
+    if (arr.length != 29)
+      throw Exception('unexpected arr length: expect 29 but see ${arr.length}');
     return SessionInfo(
       id: dco_decode_String(arr[0]),
       sessionId: dco_decode_session_id(arr[1]),
@@ -3994,19 +4081,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       prDraft: dco_decode_bool(arr[12]),
       prLabels: dco_decode_list_String(arr[13]),
       reviewDecision: dco_decode_opt_box_autoadd_review_decision(arr[14]),
-      prReviewers: dco_decode_list_String(arr[15]),
-      createdAt: dco_decode_Chrono_Utc(arr[16]),
-      unread: dco_decode_bool(arr[17]),
-      stackParentSessionId: dco_decode_opt_box_autoadd_session_id(arr[18]),
-      prBaseBranch: dco_decode_opt_String(arr[19]),
-      prMerged: dco_decode_bool(arr[20]),
-      currentSection: dco_decode_opt_String(arr[21]),
-      sectionOverride: dco_decode_opt_String(arr[22]),
-      enteredSectionAt: dco_decode_opt_box_autoadd_Chrono_Utc(arr[23]),
-      lastAttachedAt: dco_decode_opt_box_autoadd_Chrono_Utc(arr[24]),
-      worktreePath: dco_decode_String(arr[25]),
-      tmuxSessionName: dco_decode_String(arr[26]),
-      keepAlive: dco_decode_bool(arr[27]),
+      approvalSummary: dco_decode_opt_box_autoadd_approval_summary(arr[15]),
+      prReviewers: dco_decode_list_String(arr[16]),
+      createdAt: dco_decode_Chrono_Utc(arr[17]),
+      unread: dco_decode_bool(arr[18]),
+      stackParentSessionId: dco_decode_opt_box_autoadd_session_id(arr[19]),
+      prBaseBranch: dco_decode_opt_String(arr[20]),
+      prMerged: dco_decode_bool(arr[21]),
+      currentSection: dco_decode_opt_String(arr[22]),
+      sectionOverride: dco_decode_opt_String(arr[23]),
+      enteredSectionAt: dco_decode_opt_box_autoadd_Chrono_Utc(arr[24]),
+      lastAttachedAt: dco_decode_opt_box_autoadd_Chrono_Utc(arr[25]),
+      worktreePath: dco_decode_String(arr[26]),
+      tmuxSessionName: dco_decode_String(arr[27]),
+      keepAlive: dco_decode_bool(arr[28]),
     );
   }
 
@@ -4224,6 +4312,68 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApprovalRule sse_decode_approval_rule(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_kind = sse_decode_approval_rule_kind(deserializer);
+    var var_approvalsRequired = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_approvalsReceived = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_approvalsRemaining = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_satisfied = sse_decode_opt_box_autoadd_bool(deserializer);
+    return ApprovalRule(
+      id: var_id,
+      name: var_name,
+      kind: var_kind,
+      approvalsRequired: var_approvalsRequired,
+      approvalsReceived: var_approvalsReceived,
+      approvalsRemaining: var_approvalsRemaining,
+      satisfied: var_satisfied,
+    );
+  }
+
+  @protected
+  ApprovalRuleKind sse_decode_approval_rule_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ApprovalRuleKind.values[inner];
+  }
+
+  @protected
+  ApprovalStatus sse_decode_approval_status(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ApprovalStatus.values[inner];
+  }
+
+  @protected
+  ApprovalSummary sse_decode_approval_summary(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_status = sse_decode_approval_status(deserializer);
+    var var_requirementsSatisfied = sse_decode_opt_box_autoadd_bool(
+      deserializer,
+    );
+    var var_approvalsReceived = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_approvalsRequired = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_approvalsRemaining = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_rules = sse_decode_opt_list_approval_rule(deserializer);
+    var var_observedAt = sse_decode_Chrono_Utc(deserializer);
+    var var_stale = sse_decode_bool(deserializer);
+    var var_headSha = sse_decode_opt_String(deserializer);
+    return ApprovalSummary(
+      status: var_status,
+      requirementsSatisfied: var_requirementsSatisfied,
+      approvalsReceived: var_approvalsReceived,
+      approvalsRequired: var_approvalsRequired,
+      approvalsRemaining: var_approvalsRemaining,
+      rules: var_rules,
+      observedAt: var_observedAt,
+      stale: var_stale,
+      headSha: var_headSha,
+    );
+  }
+
+  @protected
   AttachKind sse_decode_attach_kind(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
@@ -4240,6 +4390,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_Chrono_Utc(deserializer));
+  }
+
+  @protected
+  ApprovalSummary sse_decode_box_autoadd_approval_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_approval_summary(deserializer));
+  }
+
+  @protected
+  bool sse_decode_box_autoadd_bool(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_bool(deserializer));
   }
 
   @protected
@@ -4754,6 +4918,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<ApprovalRule> sse_decode_list_approval_rule(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ApprovalRule>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_approval_rule(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<BranchInfo> sse_decode_list_branch_info(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -5095,6 +5273,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApprovalSummary? sse_decode_opt_box_autoadd_approval_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_approval_summary(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_bool(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   CloneJobDto? sse_decode_opt_box_autoadd_clone_job_dto(
     SseDeserializer deserializer,
   ) {
@@ -5254,6 +5456,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_workspace_def(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  List<ApprovalRule>? sse_decode_opt_list_approval_rule(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_list_approval_rule(deserializer));
     } else {
       return null;
     }
@@ -5554,6 +5769,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_reviewDecision = sse_decode_opt_box_autoadd_review_decision(
       deserializer,
     );
+    var var_approvalSummary = sse_decode_opt_box_autoadd_approval_summary(
+      deserializer,
+    );
     var var_prReviewers = sse_decode_list_String(deserializer);
     var var_createdAt = sse_decode_Chrono_Utc(deserializer);
     var var_unread = sse_decode_bool(deserializer);
@@ -5589,6 +5807,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       prDraft: var_prDraft,
       prLabels: var_prLabels,
       reviewDecision: var_reviewDecision,
+      approvalSummary: var_approvalSummary,
       prReviewers: var_prReviewers,
       createdAt: var_createdAt,
       unread: var_unread,
@@ -5851,6 +6070,53 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_approval_rule(ApprovalRule self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_approval_rule_kind(self.kind, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.approvalsRequired, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.approvalsReceived, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.approvalsRemaining, serializer);
+    sse_encode_opt_box_autoadd_bool(self.satisfied, serializer);
+  }
+
+  @protected
+  void sse_encode_approval_rule_kind(
+    ApprovalRuleKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_approval_status(
+    ApprovalStatus self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_approval_summary(
+    ApprovalSummary self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_approval_status(self.status, serializer);
+    sse_encode_opt_box_autoadd_bool(self.requirementsSatisfied, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.approvalsReceived, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.approvalsRequired, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.approvalsRemaining, serializer);
+    sse_encode_opt_list_approval_rule(self.rules, serializer);
+    sse_encode_Chrono_Utc(self.observedAt, serializer);
+    sse_encode_bool(self.stale, serializer);
+    sse_encode_opt_String(self.headSha, serializer);
+  }
+
+  @protected
   void sse_encode_attach_kind(AttachKind self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
@@ -5869,6 +6135,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_Chrono_Utc(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_approval_summary(
+    ApprovalSummary self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_approval_summary(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_bool(bool self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self, serializer);
   }
 
   @protected
@@ -6319,6 +6600,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_approval_rule(
+    List<ApprovalRule> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_approval_rule(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_branch_info(
     List<BranchInfo> self,
     SseSerializer serializer,
@@ -6639,6 +6932,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_approval_summary(
+    ApprovalSummary? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_approval_summary(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_bool(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_clone_job_dto(
     CloneJobDto? self,
     SseSerializer serializer,
@@ -6798,6 +7114,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_workspace_def(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_list_approval_rule(
+    List<ApprovalRule>? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_list_approval_rule(self, serializer);
     }
   }
 
@@ -7062,6 +7391,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.prDraft, serializer);
     sse_encode_list_String(self.prLabels, serializer);
     sse_encode_opt_box_autoadd_review_decision(self.reviewDecision, serializer);
+    sse_encode_opt_box_autoadd_approval_summary(
+      self.approvalSummary,
+      serializer,
+    );
     sse_encode_list_String(self.prReviewers, serializer);
     sse_encode_Chrono_Utc(self.createdAt, serializer);
     sse_encode_bool(self.unread, serializer);

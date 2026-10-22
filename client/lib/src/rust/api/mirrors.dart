@@ -4,6 +4,7 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
@@ -53,6 +54,112 @@ class AgentStatesSnapshotDto {
           runtimeType == other.runtimeType &&
           states == other.states &&
           commanderRunning == other.commanderRunning;
+}
+
+class ApprovalRule {
+  final String id;
+  final String name;
+  final ApprovalRuleKind kind;
+  final int? approvalsRequired;
+  final int? approvalsReceived;
+  final int? approvalsRemaining;
+  final bool? satisfied;
+
+  const ApprovalRule({
+    required this.id,
+    required this.name,
+    required this.kind,
+    this.approvalsRequired,
+    this.approvalsReceived,
+    this.approvalsRemaining,
+    this.satisfied,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      kind.hashCode ^
+      approvalsRequired.hashCode ^
+      approvalsReceived.hashCode ^
+      approvalsRemaining.hashCode ^
+      satisfied.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApprovalRule &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          kind == other.kind &&
+          approvalsRequired == other.approvalsRequired &&
+          approvalsReceived == other.approvalsReceived &&
+          approvalsRemaining == other.approvalsRemaining &&
+          satisfied == other.satisfied;
+}
+
+enum ApprovalRuleKind { anyApprover, regular, codeOwner, reportApprover, other }
+
+enum ApprovalStatus {
+  unapproved,
+  needsCodeOwner,
+  needsApprovals,
+  approved,
+  notRequired,
+  blocked,
+  unknown,
+}
+
+class ApprovalSummary {
+  final ApprovalStatus status;
+  final bool? requirementsSatisfied;
+  final int? approvalsReceived;
+  final int? approvalsRequired;
+  final int? approvalsRemaining;
+  final List<ApprovalRule>? rules;
+  final DateTime observedAt;
+  final bool stale;
+  final String? headSha;
+
+  const ApprovalSummary({
+    required this.status,
+    this.requirementsSatisfied,
+    this.approvalsReceived,
+    this.approvalsRequired,
+    this.approvalsRemaining,
+    this.rules,
+    required this.observedAt,
+    required this.stale,
+    this.headSha,
+  });
+
+  @override
+  int get hashCode =>
+      status.hashCode ^
+      requirementsSatisfied.hashCode ^
+      approvalsReceived.hashCode ^
+      approvalsRequired.hashCode ^
+      approvalsRemaining.hashCode ^
+      rules.hashCode ^
+      observedAt.hashCode ^
+      stale.hashCode ^
+      headSha.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ApprovalSummary &&
+          runtimeType == other.runtimeType &&
+          status == other.status &&
+          requirementsSatisfied == other.requirementsSatisfied &&
+          approvalsReceived == other.approvalsReceived &&
+          approvalsRequired == other.approvalsRequired &&
+          approvalsRemaining == other.approvalsRemaining &&
+          rules == other.rules &&
+          observedAt == other.observedAt &&
+          stale == other.stale &&
+          headSha == other.headSha;
 }
 
 /// Which pane of a session to attach to (agent vs the paired shell).
@@ -834,6 +941,7 @@ class SessionInfo {
   final bool prDraft;
   final List<String> prLabels;
   final ReviewDecision? reviewDecision;
+  final ApprovalSummary? approvalSummary;
   final List<String> prReviewers;
   final DateTime createdAt;
   final bool unread;
@@ -864,6 +972,7 @@ class SessionInfo {
     required this.prDraft,
     required this.prLabels,
     this.reviewDecision,
+    this.approvalSummary,
     required this.prReviewers,
     required this.createdAt,
     required this.unread,
@@ -896,6 +1005,7 @@ class SessionInfo {
       prDraft.hashCode ^
       prLabels.hashCode ^
       reviewDecision.hashCode ^
+      approvalSummary.hashCode ^
       prReviewers.hashCode ^
       createdAt.hashCode ^
       unread.hashCode ^
@@ -930,6 +1040,7 @@ class SessionInfo {
           prDraft == other.prDraft &&
           prLabels == other.prLabels &&
           reviewDecision == other.reviewDecision &&
+          approvalSummary == other.approvalSummary &&
           prReviewers == other.prReviewers &&
           createdAt == other.createdAt &&
           unread == other.unread &&
