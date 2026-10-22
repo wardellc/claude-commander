@@ -2686,6 +2686,28 @@ fn wire__crate__api__workspace__workspace_name_taken_impl(
 #[allow(clippy::unnecessary_literal_unwrap)]
 const _: fn() = || {
     {
+        let ApprovalRule = None::<crate::api::mirrors::ApprovalRule>.unwrap();
+        let _: String = ApprovalRule.id;
+        let _: String = ApprovalRule.name;
+        let _: crate::api::mirrors::ApprovalRuleKind = ApprovalRule.kind;
+        let _: Option<u32> = ApprovalRule.approvals_required;
+        let _: Option<u32> = ApprovalRule.approvals_received;
+        let _: Option<u32> = ApprovalRule.approvals_remaining;
+        let _: Option<bool> = ApprovalRule.satisfied;
+    }
+    {
+        let ApprovalSummary = None::<crate::api::mirrors::ApprovalSummary>.unwrap();
+        let _: crate::api::mirrors::ApprovalStatus = ApprovalSummary.status;
+        let _: Option<bool> = ApprovalSummary.requirements_satisfied;
+        let _: Option<u32> = ApprovalSummary.approvals_received;
+        let _: Option<u32> = ApprovalSummary.approvals_required;
+        let _: Option<u32> = ApprovalSummary.approvals_remaining;
+        let _: Option<Vec<crate::api::mirrors::ApprovalRule>> = ApprovalSummary.rules;
+        let _: chrono::DateTime<chrono::Utc> = ApprovalSummary.observed_at;
+        let _: bool = ApprovalSummary.stale;
+        let _: Option<String> = ApprovalSummary.head_sha;
+    }
+    {
         let BranchInfo = None::<crate::api::mirrors::BranchInfo>.unwrap();
         let _: String = BranchInfo.name;
         let _: bool = BranchInfo.is_remote;
@@ -2793,6 +2815,7 @@ const _: fn() = || {
         let _: bool = SessionInfo.pr_draft;
         let _: Vec<String> = SessionInfo.pr_labels;
         let _: Option<crate::api::mirrors::ReviewDecision> = SessionInfo.review_decision;
+        let _: Option<crate::api::mirrors::ApprovalSummary> = SessionInfo.approval_summary;
         let _: Vec<String> = SessionInfo.pr_reviewers;
         let _: chrono::DateTime<chrono::Utc> = SessionInfo.created_at;
         let _: bool = SessionInfo.unread;
@@ -2951,6 +2974,87 @@ impl SseDecode for crate::api::review::ApplyResultKind {
             2 => crate::api::review::ApplyResultKind::Applied,
             3 => crate::api::review::ApplyResultKind::Deferred,
             _ => unreachable!("Invalid variant for ApplyResultKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::ApprovalRule {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_name = <String>::sse_decode(deserializer);
+        let mut var_kind = <crate::api::mirrors::ApprovalRuleKind>::sse_decode(deserializer);
+        let mut var_approvalsRequired = <Option<u32>>::sse_decode(deserializer);
+        let mut var_approvalsReceived = <Option<u32>>::sse_decode(deserializer);
+        let mut var_approvalsRemaining = <Option<u32>>::sse_decode(deserializer);
+        let mut var_satisfied = <Option<bool>>::sse_decode(deserializer);
+        return crate::api::mirrors::ApprovalRule {
+            id: var_id,
+            name: var_name,
+            kind: var_kind,
+            approvals_required: var_approvalsRequired,
+            approvals_received: var_approvalsReceived,
+            approvals_remaining: var_approvalsRemaining,
+            satisfied: var_satisfied,
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::ApprovalRuleKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::mirrors::ApprovalRuleKind::AnyApprover,
+            1 => crate::api::mirrors::ApprovalRuleKind::Regular,
+            2 => crate::api::mirrors::ApprovalRuleKind::CodeOwner,
+            3 => crate::api::mirrors::ApprovalRuleKind::ReportApprover,
+            4 => crate::api::mirrors::ApprovalRuleKind::Other,
+            _ => unreachable!("Invalid variant for ApprovalRuleKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::ApprovalStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::mirrors::ApprovalStatus::Unapproved,
+            1 => crate::api::mirrors::ApprovalStatus::NeedsCodeOwner,
+            2 => crate::api::mirrors::ApprovalStatus::NeedsApprovals,
+            3 => crate::api::mirrors::ApprovalStatus::Approved,
+            4 => crate::api::mirrors::ApprovalStatus::NotRequired,
+            5 => crate::api::mirrors::ApprovalStatus::Blocked,
+            6 => crate::api::mirrors::ApprovalStatus::Unknown,
+            _ => unreachable!("Invalid variant for ApprovalStatus: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::ApprovalSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_status = <crate::api::mirrors::ApprovalStatus>::sse_decode(deserializer);
+        let mut var_requirementsSatisfied = <Option<bool>>::sse_decode(deserializer);
+        let mut var_approvalsReceived = <Option<u32>>::sse_decode(deserializer);
+        let mut var_approvalsRequired = <Option<u32>>::sse_decode(deserializer);
+        let mut var_approvalsRemaining = <Option<u32>>::sse_decode(deserializer);
+        let mut var_rules =
+            <Option<Vec<crate::api::mirrors::ApprovalRule>>>::sse_decode(deserializer);
+        let mut var_observedAt = <chrono::DateTime<chrono::Utc>>::sse_decode(deserializer);
+        let mut var_stale = <bool>::sse_decode(deserializer);
+        let mut var_headSha = <Option<String>>::sse_decode(deserializer);
+        return crate::api::mirrors::ApprovalSummary {
+            status: var_status,
+            requirements_satisfied: var_requirementsSatisfied,
+            approvals_received: var_approvalsReceived,
+            approvals_required: var_approvalsRequired,
+            approvals_remaining: var_approvalsRemaining,
+            rules: var_rules,
+            observed_at: var_observedAt,
+            stale: var_stale,
+            head_sha: var_headSha,
         };
     }
 }
@@ -3444,6 +3548,20 @@ impl SseDecode for Vec<crate::api::mirrors::AgentStateEntryDto> {
     }
 }
 
+impl SseDecode for Vec<crate::api::mirrors::ApprovalRule> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::mirrors::ApprovalRule>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::mirrors::BranchInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3791,6 +3909,30 @@ impl SseDecode for Option<chrono::DateTime<chrono::Utc>> {
     }
 }
 
+impl SseDecode for Option<crate::api::mirrors::ApprovalSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::mirrors::ApprovalSummary>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<bool>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::mirrors::CloneJobDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3940,6 +4082,19 @@ impl SseDecode for Option<crate::api::mirrors::WorkspaceDef> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::mirrors::WorkspaceDef>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<Vec<crate::api::mirrors::ApprovalRule>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<crate::api::mirrors::ApprovalRule>>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -4317,6 +4472,8 @@ impl SseDecode for crate::api::mirrors::SessionInfo {
         let mut var_prLabels = <Vec<String>>::sse_decode(deserializer);
         let mut var_reviewDecision =
             <Option<crate::api::mirrors::ReviewDecision>>::sse_decode(deserializer);
+        let mut var_approvalSummary =
+            <Option<crate::api::mirrors::ApprovalSummary>>::sse_decode(deserializer);
         let mut var_prReviewers = <Vec<String>>::sse_decode(deserializer);
         let mut var_createdAt = <chrono::DateTime<chrono::Utc>>::sse_decode(deserializer);
         let mut var_unread = <bool>::sse_decode(deserializer);
@@ -4349,6 +4506,7 @@ impl SseDecode for crate::api::mirrors::SessionInfo {
             pr_draft: var_prDraft,
             pr_labels: var_prLabels,
             review_decision: var_reviewDecision,
+            approval_summary: var_approvalSummary,
             pr_reviewers: var_prReviewers,
             created_at: var_createdAt,
             unread: var_unread,
@@ -4736,6 +4894,110 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ApplyResultKind>
 {
     fn into_into_dart(self) -> crate::api::review::ApplyResultKind {
         self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::ApprovalRule> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.id.into_into_dart().into_dart(),
+            self.0.name.into_into_dart().into_dart(),
+            self.0.kind.into_into_dart().into_dart(),
+            self.0.approvals_required.into_into_dart().into_dart(),
+            self.0.approvals_received.into_into_dart().into_dart(),
+            self.0.approvals_remaining.into_into_dart().into_dart(),
+            self.0.satisfied.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::ApprovalRule>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::ApprovalRule>>
+    for crate::api::mirrors::ApprovalRule
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::ApprovalRule> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::ApprovalRuleKind> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::mirrors::ApprovalRuleKind::AnyApprover => 0.into_dart(),
+            crate::api::mirrors::ApprovalRuleKind::Regular => 1.into_dart(),
+            crate::api::mirrors::ApprovalRuleKind::CodeOwner => 2.into_dart(),
+            crate::api::mirrors::ApprovalRuleKind::ReportApprover => 3.into_dart(),
+            crate::api::mirrors::ApprovalRuleKind::Other => 4.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::ApprovalRuleKind>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::ApprovalRuleKind>>
+    for crate::api::mirrors::ApprovalRuleKind
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::ApprovalRuleKind> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::ApprovalStatus> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::mirrors::ApprovalStatus::Unapproved => 0.into_dart(),
+            crate::api::mirrors::ApprovalStatus::NeedsCodeOwner => 1.into_dart(),
+            crate::api::mirrors::ApprovalStatus::NeedsApprovals => 2.into_dart(),
+            crate::api::mirrors::ApprovalStatus::Approved => 3.into_dart(),
+            crate::api::mirrors::ApprovalStatus::NotRequired => 4.into_dart(),
+            crate::api::mirrors::ApprovalStatus::Blocked => 5.into_dart(),
+            crate::api::mirrors::ApprovalStatus::Unknown => 6.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::ApprovalStatus>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::ApprovalStatus>>
+    for crate::api::mirrors::ApprovalStatus
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::ApprovalStatus> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::ApprovalSummary> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.0.status.into_into_dart().into_dart(),
+            self.0.requirements_satisfied.into_into_dart().into_dart(),
+            self.0.approvals_received.into_into_dart().into_dart(),
+            self.0.approvals_required.into_into_dart().into_dart(),
+            self.0.approvals_remaining.into_into_dart().into_dart(),
+            self.0.rules.into_into_dart().into_dart(),
+            self.0.observed_at.into_into_dart().into_dart(),
+            self.0.stale.into_into_dart().into_dart(),
+            self.0.head_sha.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::ApprovalSummary>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::ApprovalSummary>>
+    for crate::api::mirrors::ApprovalSummary
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::ApprovalSummary> {
+        self.into()
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -6027,6 +6289,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::SessionIn
             self.0.pr_draft.into_into_dart().into_dart(),
             self.0.pr_labels.into_into_dart().into_dart(),
             self.0.review_decision.into_into_dart().into_dart(),
+            self.0.approval_summary.into_into_dart().into_dart(),
             self.0.pr_reviewers.into_into_dart().into_dart(),
             self.0.created_at.into_into_dart().into_dart(),
             self.0.unread.into_into_dart().into_dart(),
@@ -6334,6 +6597,74 @@ impl SseEncode for crate::api::review::ApplyResultKind {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::mirrors::ApprovalRule {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.name, serializer);
+        <crate::api::mirrors::ApprovalRuleKind>::sse_encode(self.kind, serializer);
+        <Option<u32>>::sse_encode(self.approvals_required, serializer);
+        <Option<u32>>::sse_encode(self.approvals_received, serializer);
+        <Option<u32>>::sse_encode(self.approvals_remaining, serializer);
+        <Option<bool>>::sse_encode(self.satisfied, serializer);
+    }
+}
+
+impl SseEncode for crate::api::mirrors::ApprovalRuleKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::mirrors::ApprovalRuleKind::AnyApprover => 0,
+                crate::api::mirrors::ApprovalRuleKind::Regular => 1,
+                crate::api::mirrors::ApprovalRuleKind::CodeOwner => 2,
+                crate::api::mirrors::ApprovalRuleKind::ReportApprover => 3,
+                crate::api::mirrors::ApprovalRuleKind::Other => 4,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::mirrors::ApprovalStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::mirrors::ApprovalStatus::Unapproved => 0,
+                crate::api::mirrors::ApprovalStatus::NeedsCodeOwner => 1,
+                crate::api::mirrors::ApprovalStatus::NeedsApprovals => 2,
+                crate::api::mirrors::ApprovalStatus::Approved => 3,
+                crate::api::mirrors::ApprovalStatus::NotRequired => 4,
+                crate::api::mirrors::ApprovalStatus::Blocked => 5,
+                crate::api::mirrors::ApprovalStatus::Unknown => 6,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::mirrors::ApprovalSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::mirrors::ApprovalStatus>::sse_encode(self.status, serializer);
+        <Option<bool>>::sse_encode(self.requirements_satisfied, serializer);
+        <Option<u32>>::sse_encode(self.approvals_received, serializer);
+        <Option<u32>>::sse_encode(self.approvals_required, serializer);
+        <Option<u32>>::sse_encode(self.approvals_remaining, serializer);
+        <Option<Vec<crate::api::mirrors::ApprovalRule>>>::sse_encode(self.rules, serializer);
+        <chrono::DateTime<chrono::Utc>>::sse_encode(self.observed_at, serializer);
+        <bool>::sse_encode(self.stale, serializer);
+        <Option<String>>::sse_encode(self.head_sha, serializer);
     }
 }
 
@@ -6733,6 +7064,16 @@ impl SseEncode for Vec<crate::api::mirrors::AgentStateEntryDto> {
     }
 }
 
+impl SseEncode for Vec<crate::api::mirrors::ApprovalRule> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::mirrors::ApprovalRule>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::mirrors::BranchInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7012,6 +7353,26 @@ impl SseEncode for Option<chrono::DateTime<chrono::Utc>> {
     }
 }
 
+impl SseEncode for Option<crate::api::mirrors::ApprovalSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::mirrors::ApprovalSummary>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <bool>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::mirrors::CloneJobDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7138,6 +7499,16 @@ impl SseEncode for Option<crate::api::mirrors::WorkspaceDef> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::mirrors::WorkspaceDef>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<crate::api::mirrors::ApprovalRule>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<crate::api::mirrors::ApprovalRule>>::sse_encode(value, serializer);
         }
     }
 }
@@ -7461,6 +7832,10 @@ impl SseEncode for crate::api::mirrors::SessionInfo {
         <bool>::sse_encode(self.pr_draft, serializer);
         <Vec<String>>::sse_encode(self.pr_labels, serializer);
         <Option<crate::api::mirrors::ReviewDecision>>::sse_encode(self.review_decision, serializer);
+        <Option<crate::api::mirrors::ApprovalSummary>>::sse_encode(
+            self.approval_summary,
+            serializer,
+        );
         <Vec<String>>::sse_encode(self.pr_reviewers, serializer);
         <chrono::DateTime<chrono::Utc>>::sse_encode(self.created_at, serializer);
         <bool>::sse_encode(self.unread, serializer);

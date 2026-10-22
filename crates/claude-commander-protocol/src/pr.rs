@@ -23,7 +23,7 @@ pub enum PrState {
 pub enum ReviewDecision {
     /// Reviews requested, none decisive yet (includes comment-only reviews).
     ReviewRequired,
-    /// At least one approving review and no outstanding changes-requested.
+    /// GitHub reported `APPROVED`; this is not calculated from a local count.
     Approved,
     /// At least one reviewer requested changes.
     ChangesRequested,

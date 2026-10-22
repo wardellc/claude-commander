@@ -18,6 +18,8 @@ pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
 /// PR metadata returned by `gh pr list` for the session list view.
 #[derive(Debug, Clone)]
 pub struct PrInfo {
+    pub approval_summary: Option<Box<claude_commander_protocol::approval::ApprovalSummary>>,
+    pub head_sha: Option<String>,
     pub number: u32,
     pub url: String,
     pub state: PrState,
@@ -231,7 +233,7 @@ pub async fn check_pr_for_branch(
             "--state",
             "all",
             "--json",
-            "number,url,state,isDraft,labels,baseRefName,reviewDecision,reviewRequests,latestReviews,createdAt,closedAt,mergedAt",
+            "number,url,state,isDraft,labels,baseRefName,headRefOid,reviewDecision,reviewRequests,latestReviews,createdAt,closedAt,mergedAt",
             "--limit",
             "5",
         ])
@@ -258,7 +260,15 @@ pub async fn check_pr_for_branch(
     let Ok(json) = String::from_utf8(output.stdout) else {
         return PrCheckResult::FetchFailed;
     };
-    parse_pr_list_json(&json, branch_owned_since)
+    let mut result = parse_pr_list_json(&json, branch_owned_since);
+    if let PrCheckResult::Found(info) = &mut result {
+        info.approval_summary =
+            super::approval::github_approvals(repo_path, &info.url, info.number)
+                .await
+                .filter(|summary| summary.head_sha.is_some() && summary.head_sha == info.head_sha)
+                .map(Box::new);
+    }
+    result
 }
 
 /// Parse the JSON array returned by the `gh pr list --json …` query in
@@ -405,6 +415,8 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
     let base_ref_name = v["baseRefName"].as_str().map(str::to_string);
 
     Some(PrInfo {
+        approval_summary: None,
+        head_sha: v["headRefOid"].as_str().map(str::to_owned),
         number,
         url,
         state,

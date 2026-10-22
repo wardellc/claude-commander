@@ -1405,6 +1405,7 @@ impl CommanderService {
                     };
                     match result {
                         PrCheckResult::Found(info) => {
+                            apply_approval_observation(session, info);
                             session.pr_number = Some(info.number);
                             session.pr_url = Some(info.url.clone());
                             session.pr_state = Some(info.state);
@@ -1418,7 +1419,11 @@ impl CommanderService {
                         PrCheckResult::NotFound => {
                             session.clear_review_metadata();
                         }
-                        PrCheckResult::FetchFailed => {}
+                        PrCheckResult::FetchFailed => {
+                            if let Some(summary) = &mut session.approval_summary {
+                                summary.stale = true;
+                            }
+                        }
                     }
                 }
                 for session in state.sessions.values_mut() {
@@ -2516,6 +2521,11 @@ impl CommanderService {
             return Ok(0);
         }
         if !self.code_host_cli_available(provider).await {
+            let failed = targets
+                .iter()
+                .map(|(id, ..)| (*id, PrCheckResult::FetchFailed))
+                .collect();
+            self.apply_pr_results_for_provider(provider, failed).await?;
             return Err(crate::error::GitError::CodeHostCliUnavailable { provider }.into());
         }
         let results: Vec<(SessionId, PrCheckResult)> =
@@ -2789,9 +2799,6 @@ impl CommanderService {
                 // queries GitHub with the corrected `--head` name.
                 if let Err(e) = service.reconcile_session_branches().await {
                     debug!("reconcile_session_branches failed: {e}");
-                }
-                if !service.code_host_cli_available(provider).await {
-                    continue;
                 }
                 if let Err(e) = service.refresh_pr_status_for_provider(provider, None).await {
                     debug!("PR metadata refresh failed: {e}");
@@ -3458,6 +3465,24 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
         })
 }
 
+fn apply_approval_observation(session: &mut WorktreeSession, info: &crate::git::PrInfo) {
+    if let Some(summary) = &info.approval_summary
+        && summary.head_sha.is_some()
+        && summary.head_sha == info.head_sha
+    {
+        session.approval_summary = Some((**summary).clone());
+    } else if session.pr_number == Some(info.number)
+        && session.pr_url.as_deref() == Some(info.url.as_str())
+        && let Some(summary) = &mut session.approval_summary
+        && summary.head_sha.is_some()
+        && summary.head_sha == info.head_sha
+    {
+        summary.stale = true;
+    } else {
+        session.approval_summary = None;
+    }
+}
+
 // -- Response types --
 //
 // The HTTP request/response DTOs live in `claude-commander-protocol`
@@ -3497,6 +3522,7 @@ pub(crate) fn session_info_from_session(
         pr_labels: session.pr_labels.clone(),
         review_decision: session.review_decision,
         pr_reviewers: session.pr_reviewers.clone(),
+        approval_summary: session.approval_summary.clone(),
         created_at: session.created_at,
         unread: session.unread,
         stack_parent_session_id: session.stack_parent_session_id,
@@ -4929,6 +4955,136 @@ mod tests {
         assert!(state.get_session(&sid).unwrap().unread);
     }
 
+    fn approval_test_observation() -> claude_commander_protocol::approval::ApprovalSummary {
+        use claude_commander_protocol::approval::{ApprovalStatus, ApprovalSummary};
+        ApprovalSummary {
+            status: ApprovalStatus::Approved,
+            requirements_satisfied: Some(true),
+            approvals_received: Some(2),
+            approvals_required: Some(2),
+            approvals_remaining: Some(0),
+            rules: Some(vec![]),
+            observed_at: Utc::now(),
+            stale: false,
+            head_sha: Some("head".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_counts_reach_snapshots_and_detail_and_failures_mark_them_stale() {
+        use crate::git::{PrCheckResult, PrInfo, PrState};
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_, sid) = seed_project_session(&svc).await;
+        let mut info = PrInfo {
+            number: 42,
+            url: "https://example/pr/42".into(),
+            state: PrState::Open,
+            is_draft: false,
+            labels: vec![],
+            review_decision: None,
+            reviewers: vec![],
+            base_ref_name: None,
+            head_sha: Some("head".into()),
+            approval_summary: Some(Box::new(approval_test_observation())),
+        };
+        svc.apply_pr_results(vec![(sid, PrCheckResult::Found(info.clone()))])
+            .await
+            .unwrap();
+        let snapshot = svc.snapshot().await.unwrap();
+        let wire = serde_json::to_value(
+            snapshot
+                .sessions
+                .iter()
+                .find(|s| s.session_id == sid)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(wire["approval_summary"]["approvals_required"], 2);
+        let detail = svc
+            .get_session_detail(&sid.to_string(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let detail_wire = serde_json::to_value(detail).unwrap();
+        assert_eq!(detail_wire["approval_summary"], wire["approval_summary"]);
+        info.approval_summary = None;
+        svc.apply_pr_results(vec![(sid, PrCheckResult::Found(info.clone()))])
+            .await
+            .unwrap();
+        let snapshot = svc.snapshot().await.unwrap();
+        let summary = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.session_id == sid)
+            .unwrap()
+            .approval_summary
+            .as_ref()
+            .unwrap();
+        assert!(summary.stale);
+        assert_eq!(summary.approvals_required, Some(2));
+        info.head_sha = Some("new-head".into());
+        svc.apply_pr_results(vec![(sid, PrCheckResult::Found(info.clone()))])
+            .await
+            .unwrap();
+        assert!(
+            svc.store
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .approval_summary
+                .is_none()
+        );
+        info.head_sha = Some("head".into());
+        info.approval_summary = Some(Box::new(approval_test_observation()));
+        svc.apply_pr_results(vec![(sid, PrCheckResult::Found(info))])
+            .await
+            .unwrap();
+        svc.apply_pr_results(vec![(sid, PrCheckResult::FetchFailed)])
+            .await
+            .unwrap();
+        assert!(
+            svc.store
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .approval_summary
+                .as_ref()
+                .unwrap()
+                .stale
+        );
+        svc.apply_pr_results(vec![(sid, PrCheckResult::NotFound)])
+            .await
+            .unwrap();
+        assert!(
+            svc.store
+                .read()
+                .await
+                .get_session(&sid)
+                .unwrap()
+                .approval_summary
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn persisted_approval_counts_are_stale_until_refreshed_and_old_state_still_loads() {
+        let mut session = make_session_for_project("approvals", ProjectId::new());
+        session.approval_summary = Some(approval_test_observation());
+        let mut wire = serde_json::to_value(session).unwrap();
+        let restored: WorktreeSession = serde_json::from_value(wire.clone()).unwrap();
+        assert!(restored.approval_summary.unwrap().stale);
+        wire.as_object_mut().unwrap().remove("approval_summary");
+        assert!(
+            serde_json::from_value::<WorktreeSession>(wire)
+                .unwrap()
+                .approval_summary
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn apply_pr_results_sets_and_clears_pr_fields() {
         use crate::git::{PrCheckResult, PrInfo};
@@ -4945,6 +5101,8 @@ mod tests {
             review_decision: None,
             reviewers: vec![],
             base_ref_name: Some("main".to_string()),
+            approval_summary: None,
+            head_sha: None,
         };
         svc.apply_pr_results(vec![(sid, PrCheckResult::Found(info))])
             .await
@@ -4983,6 +5141,8 @@ mod tests {
                 review_decision: Some(crate::git::ReviewDecision::Approved),
                 reviewers: vec!["alice".into()],
                 base_ref_name: Some("parent".into()),
+                approval_summary: Some(Box::new(approval_test_observation())),
+                head_sha: Some("head".into()),
             })
         };
 
@@ -5017,6 +5177,7 @@ mod tests {
         assert!(session.pr_labels.is_empty());
         assert!(!session.pr_merged);
         assert!(session.review_decision.is_none());
+        assert!(session.approval_summary.is_none());
         assert!(session.pr_reviewers.is_empty());
         assert!(session.pr_base_branch.is_none());
     }
@@ -6015,6 +6176,8 @@ mod tests {
                 review_decision: None,
                 reviewers: Vec::new(),
                 base_ref_name: Some("main".to_string()),
+                approval_summary: None,
+                head_sha: None,
             }),
         )])
         .await
@@ -6241,6 +6404,16 @@ mod tests {
                     let state = svc.store().read().await;
                     assert_eq!(state.get_session(&first_id).unwrap().pr_number, Some(42));
                     assert_eq!(state.get_session(&second_id).unwrap().pr_number, None);
+                    assert_eq!(
+                        state
+                            .get_session(&first_id)
+                            .unwrap()
+                            .approval_summary
+                            .as_ref()
+                            .unwrap()
+                            .approvals_received,
+                        Some(1)
+                    );
                 }
                 let persisted = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
                 assert!(persisted.contains("https://github.com/example/repo/pull/42"));
@@ -6257,6 +6430,17 @@ mod tests {
                 std::fs::write(std::env::var_os("CC_TEST_PR_REFRESH_FAIL").unwrap(), "fail")
                     .unwrap();
                 assert!(svc.refresh_pr_status(Some(&first_id)).await.is_err());
+                assert!(
+                    svc.store()
+                        .read()
+                        .await
+                        .get_session(&first_id)
+                        .unwrap()
+                        .approval_summary
+                        .as_ref()
+                        .unwrap()
+                        .stale
+                );
                 assert_eq!(
                     svc.store()
                         .read()
@@ -6277,7 +6461,11 @@ mod tests {
             r#"#!/bin/sh
 if [ "$1" = "--version" ]; then exit 0; fi
 if [ -f "$CC_TEST_PR_REFRESH_FAIL" ]; then exit 1; fi
-printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN"}]'
+if [ "$1" = "api" ]; then
+  printf '%s' '{"data":{"repository":{"pullRequest":{"headRefOid":"head","reviewDecision":"APPROVED","latestOpinionatedReviews":{"totalCount":1,"nodes":[{"author":{"login":"owner"},"state":"APPROVED"}]}}}}}'
+else
+  printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN","headRefOid":"head"}]'
+fi
 "#,
         )
         .unwrap();

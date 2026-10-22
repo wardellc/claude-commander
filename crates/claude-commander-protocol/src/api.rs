@@ -45,6 +45,8 @@ pub struct SessionInfo {
     pub pr_draft: bool,
     pub pr_labels: Vec<String>,
     pub review_decision: Option<ReviewDecision>,
+    #[serde(default)]
+    pub approval_summary: Option<crate::approval::ApprovalSummary>,
     pub pr_reviewers: Vec<String>,
     pub created_at: DateTime<Utc>,
     // Fields below are additive; older clients that don't send them still

@@ -7,6 +7,7 @@
 use std::borrow::Cow;
 
 use chrono::{DateTime, Utc};
+use claude_commander_protocol::approval::ApprovalStatus;
 use serde::{Deserialize, Serialize};
 
 use crate::git::{PrState, ReviewDecision};
@@ -27,6 +28,8 @@ pub struct SectionConfig {
     pub has_pr: Option<bool>,
     #[serde(default)]
     pub review_decision: Option<DecisionPredicate>,
+    #[serde(default)]
+    pub approval_status: Option<OneOrMany<ApprovalStatus>>,
     #[serde(default)]
     pub has_reviewer: Option<ReviewerPredicate>,
     /// Advisory WIP limit. When `Some(n)`, the section header shows
@@ -179,6 +182,7 @@ fn has_predicates(section: &SectionConfig) -> bool {
         || section.has_label.is_some()
         || section.has_pr.is_some()
         || section.review_decision.is_some()
+        || section.approval_status.is_some()
         || section.has_reviewer.is_some()
 }
 
@@ -421,6 +425,15 @@ pub fn rename_section(session: &mut WorktreeSession, old: &str, new: &str) -> bo
 }
 
 fn section_matches(session: &WorktreeSession, section: &SectionConfig) -> bool {
+    if let Some(predicate) = &section.approval_status {
+        let status = session
+            .approval_summary
+            .as_ref()
+            .map_or(ApprovalStatus::Unknown, |summary| summary.current_status());
+        if !predicate.matches(Some(status)) {
+            return false;
+        }
+    }
     if let Some(state_pred) = &section.pr_state
         && !state_pred.matches(session.pr_state)
     {
@@ -460,6 +473,70 @@ mod tests {
     use crate::session::{ProjectId, WorktreeSession};
     use chrono::{Duration, Utc};
     use std::path::PathBuf;
+
+    #[test]
+    fn approval_status_condition_survives_config_round_trip() {
+        let section: SectionConfig = toml::from_str(
+            "name = 'Owners'\napproval_status = ['needs_code_owner', 'needs_approvals']",
+        )
+        .unwrap();
+        let value = serde_json::to_value(section).unwrap();
+        assert_eq!(
+            value["approval_status"],
+            serde_json::json!(["needs_code_owner", "needs_approvals"])
+        );
+    }
+
+    #[test]
+    fn approval_conditions_require_fresh_data_and_keep_forward_only_movement() {
+        use claude_commander_protocol::approval::{ApprovalStatus, ApprovalSummary};
+        let mut session = make_session();
+        let sections: Vec<SectionConfig> = toml::from_str::<crate::config::Config>(
+            "[[sections]]\nname='Owners'\napproval_status='needs_code_owner'\n\
+             [[sections]]\nname='Approved'\napproval_status='approved'",
+        )
+        .unwrap()
+        .sections;
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::InProgress
+        );
+        session.approval_summary = Some(ApprovalSummary {
+            status: ApprovalStatus::NeedsCodeOwner,
+            requirements_satisfied: Some(false),
+            approvals_received: Some(2),
+            approvals_required: Some(2),
+            approvals_remaining: Some(1),
+            rules: None,
+            observed_at: Utc::now(),
+            stale: false,
+            head_sha: Some("head".into()),
+        });
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("Owners".into())
+        );
+        session.approval_summary.as_mut().unwrap().status = ApprovalStatus::Approved;
+        session.approval_summary.as_mut().unwrap().stale = true;
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::InProgress
+        );
+        session.approval_summary.as_mut().unwrap().stale = false;
+        apply_assignment(&mut session, &sections, Utc::now());
+        assert_eq!(session.current_section.as_deref(), Some("Approved"));
+        session.approval_summary.as_mut().unwrap().status = ApprovalStatus::NeedsCodeOwner;
+        apply_assignment(&mut session, &sections, Utc::now());
+        assert_eq!(session.current_section.as_deref(), Some("Approved"));
+        let unknown: SectionConfig =
+            toml::from_str("name='Unknown'\napproval_status='unknown'").unwrap();
+        session.current_section = None;
+        session.approval_summary = None;
+        assert_eq!(
+            assign_section(&session, &[unknown]),
+            SectionAssignment::Matched("Unknown".into())
+        );
+    }
 
     fn make_session() -> WorktreeSession {
         WorktreeSession::new(

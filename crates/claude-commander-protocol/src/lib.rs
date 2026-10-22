@@ -21,6 +21,7 @@
 //! type gets the same `cfg_attr` derive and a line in `ts_export.rs`.
 
 pub mod api;
+pub mod approval;
 pub mod comment;
 pub mod config;
 pub mod connection;

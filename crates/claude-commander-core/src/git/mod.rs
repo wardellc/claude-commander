@@ -5,6 +5,7 @@
 //! - `WorktreeManager` - Worktree lifecycle management
 //! - `DiffCache` - Cached diff computation
 
+mod approval;
 mod auto_pull;
 mod backend;
 mod bounded;

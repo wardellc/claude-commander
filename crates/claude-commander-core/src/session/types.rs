@@ -170,6 +170,9 @@ pub struct WorktreeSession {
     /// Reviewer usernames on the hosted review. Empty when absent or unassigned.
     #[serde(default)]
     pub pr_reviewers: Vec<String>,
+    /// Cached host approval observation; restored observations are always stale.
+    #[serde(default, deserialize_with = "deserialize_cached_approval")]
+    pub approval_summary: Option<claude_commander_protocol::approval::ApprovalSummary>,
     /// Target branch reported by the selected provider (e.g. `main` or another
     /// session's branch), used as the source of truth for stack detection.
     #[serde(default)]
@@ -223,6 +226,17 @@ pub struct WorktreeSession {
     pub hibernated: bool,
 }
 
+fn deserialize_cached_approval<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<claude_commander_protocol::approval::ApprovalSummary>, D::Error> {
+    let mut summary =
+        Option::<claude_commander_protocol::approval::ApprovalSummary>::deserialize(deserializer)?;
+    if let Some(summary) = &mut summary {
+        summary.stale = true;
+    }
+    Ok(summary)
+}
+
 impl WorktreeSession {
     /// Create a new worktree session
     pub fn new(
@@ -262,6 +276,7 @@ impl WorktreeSession {
             pr_labels: Vec::new(),
             review_decision: None,
             pr_reviewers: Vec::new(),
+            approval_summary: None,
             pr_base_branch: None,
             stack_parent_session_id: None,
             unread: false,
@@ -313,6 +328,7 @@ impl WorktreeSession {
             pr_labels: Vec::new(),
             review_decision: None,
             pr_reviewers: Vec::new(),
+            approval_summary: None,
             pr_base_branch: None,
             stack_parent_session_id: None,
             unread: false,
@@ -386,6 +402,7 @@ impl WorktreeSession {
         self.pr_labels.clear();
         self.pr_merged = false;
         self.review_decision = None;
+        self.approval_summary = None;
         self.pr_reviewers.clear();
         self.pr_base_branch = None;
     }
@@ -1560,6 +1577,7 @@ mod session_info_stack_node_tests {
             pr_labels: Vec::new(),
             review_decision: None,
             pr_reviewers: Vec::new(),
+            approval_summary: None,
             created_at: Utc::now() + ChronoDuration::seconds(created_offset_secs),
             unread: false,
             stack_parent_session_id: None,

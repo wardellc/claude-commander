@@ -3368,6 +3368,30 @@ fn predicate_rows(
                 .max_sessions
                 .map_or_else(|| not_set.clone(), |n| n.to_string()),
         ),
+        (
+            "approval_status".into(),
+            section.approval_status.as_ref().map_or_else(
+                || not_set.clone(),
+                |predicate| {
+                    use claude_commander_core::session::section::OneOrMany;
+                    let values = match predicate {
+                        OneOrMany::One(value) => vec![*value],
+                        OneOrMany::Any(values) => values.clone(),
+                    };
+                    values
+                        .iter()
+                        .map(|value| {
+                            serde_json::to_value(value)
+                                .unwrap()
+                                .as_str()
+                                .unwrap()
+                                .to_owned()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            ),
+        ),
     ]
 }
 
@@ -3476,6 +3500,23 @@ fn apply_predicate_edit(
                 None
             } else {
                 trimmed.parse::<u32>().ok().filter(|&n| n > 0)
+            };
+        }
+        // approval_status
+        7 => {
+            let parsed: Vec<claude_commander_protocol::approval::ApprovalStatus> = trimmed
+                .split(',')
+                .filter_map(|value| {
+                    serde_json::from_value(serde_json::Value::String(
+                        value.trim().to_lowercase().replace(['-', ' '], "_"),
+                    ))
+                    .ok()
+                })
+                .collect();
+            section.approval_status = match parsed.as_slice() {
+                [] => None,
+                [value] => Some(OneOrMany::One(*value)),
+                _ => Some(OneOrMany::Any(parsed)),
             };
         }
         _ => {}
@@ -3813,6 +3854,22 @@ fn code_host_options() -> Vec<PickerOption> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn approval_predicate_editor_round_trips_and_can_clear() {
+        use super::*;
+        let mut section = claude_commander_core::session::SectionConfig::default();
+        apply_predicate_edit(&mut section, 7, "needs_code_owner, needs_approvals");
+        let rows = predicate_rows(&section);
+        assert_eq!(
+            rows[7],
+            (
+                "approval_status".into(),
+                "needs_code_owner, needs_approvals".into()
+            )
+        );
+        apply_predicate_edit(&mut section, 7, "");
+        assert!(section.approval_status.is_none());
+    }
     use super::*;
 
     fn rows_with_labels(labels: &[&str]) -> Vec<SettingsRow> {
