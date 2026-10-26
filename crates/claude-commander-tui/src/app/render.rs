@@ -49,6 +49,13 @@ pub(super) fn commander_chip_label(
         Some(AgentState::WaitingForInput) => " \u{00b7} waiting",
         Some(AgentState::Idle) => " \u{00b7} idle",
         Some(AgentState::Unknown) | None => "",
+        Some(AgentState::Starting) => " · starting",
+        Some(AgentState::WaitingForApproval) => " · approval",
+        Some(AgentState::Compacting) => " · compacting",
+        Some(AgentState::Retrying) => " · retrying",
+        Some(AgentState::Failed) => " · failed",
+        Some(AgentState::RateLimited) => " · limited",
+        Some(AgentState::Interrupted) => " · interrupted",
     };
     Some(format!("\u{25cf} Commander{suffix}"))
 }
@@ -621,6 +628,11 @@ impl App {
         };
 
         InfoContent::Session(InfoSessionData {
+            agent_status: self
+                .view_for(sref.backend)
+                .agent_states
+                .observations
+                .get(&session_id),
             title,
             branch,
             created_at,

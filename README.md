@@ -1,5 +1,8 @@
 # Claude Commander
 
+Claude and Codex activity reporting supports optional lifecycle hooks alongside
+terminal detection. See [agent status and hook setup](docs/agent-status.md).
+
 A high-performance terminal UI for managing Claude coding sessions, written in Rust.
 
 ![The session list grouped by section, with PR stacks nested and a live preview of the selected session's agent](docs/images/stacked.svg)

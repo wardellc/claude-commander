@@ -2932,6 +2932,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AgentObservationDto dco_decode_agent_observation_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return AgentObservationDto(
+      sessionId: dco_decode_session_id(arr[0]),
+      source: dco_decode_agent_status_source(arr[1]),
+      observedAtMs: dco_decode_i_64(arr[2]),
+      lastOutcome: dco_decode_opt_box_autoadd_agent_turn_outcome(arr[3]),
+      completedTurns: dco_decode_u_32(arr[4]),
+      generation: dco_decode_String(arr[5]),
+    );
+  }
+
+  @protected
   AgentState dco_decode_agent_state(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return AgentState.values[raw as int];
@@ -2953,12 +2969,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   AgentStatesSnapshotDto dco_decode_agent_states_snapshot_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return AgentStatesSnapshotDto(
-      states: dco_decode_list_agent_state_entry_dto(arr[0]),
-      commanderRunning: dco_decode_bool(arr[1]),
+      observations: dco_decode_list_agent_observation_dto(arr[0]),
+      states: dco_decode_list_agent_state_entry_dto(arr[1]),
+      commanderRunning: dco_decode_bool(arr[2]),
     );
+  }
+
+  @protected
+  AgentStatusSource dco_decode_agent_status_source(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AgentStatusSource.values[raw as int];
+  }
+
+  @protected
+  AgentTurnOutcome dco_decode_agent_turn_outcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AgentTurnOutcome.values[raw as int];
   }
 
   @protected
@@ -3045,6 +3074,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_Chrono_Utc(raw);
+  }
+
+  @protected
+  AgentTurnOutcome dco_decode_box_autoadd_agent_turn_outcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_agent_turn_outcome(raw);
   }
 
   @protected
@@ -3503,6 +3538,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<AgentObservationDto> dco_decode_list_agent_observation_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_agent_observation_dto)
+        .toList();
+  }
+
+  @protected
   List<AgentStateEntryDto> dco_decode_list_agent_state_entry_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>)
@@ -3702,6 +3745,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_Chrono_Utc(raw);
+  }
+
+  @protected
+  AgentTurnOutcome? dco_decode_opt_box_autoadd_agent_turn_outcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_agent_turn_outcome(raw);
   }
 
   @protected
@@ -4260,6 +4309,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AgentObservationDto sse_decode_agent_observation_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_sessionId = sse_decode_session_id(deserializer);
+    var var_source = sse_decode_agent_status_source(deserializer);
+    var var_observedAtMs = sse_decode_i_64(deserializer);
+    var var_lastOutcome = sse_decode_opt_box_autoadd_agent_turn_outcome(
+      deserializer,
+    );
+    var var_completedTurns = sse_decode_u_32(deserializer);
+    var var_generation = sse_decode_String(deserializer);
+    return AgentObservationDto(
+      sessionId: var_sessionId,
+      source: var_source,
+      observedAtMs: var_observedAtMs,
+      lastOutcome: var_lastOutcome,
+      completedTurns: var_completedTurns,
+      generation: var_generation,
+    );
+  }
+
+  @protected
   AgentState sse_decode_agent_state(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
@@ -4281,12 +4353,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_observations = sse_decode_list_agent_observation_dto(deserializer);
     var var_states = sse_decode_list_agent_state_entry_dto(deserializer);
     var var_commanderRunning = sse_decode_bool(deserializer);
     return AgentStatesSnapshotDto(
+      observations: var_observations,
       states: var_states,
       commanderRunning: var_commanderRunning,
     );
+  }
+
+  @protected
+  AgentStatusSource sse_decode_agent_status_source(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return AgentStatusSource.values[inner];
+  }
+
+  @protected
+  AgentTurnOutcome sse_decode_agent_turn_outcome(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return AgentTurnOutcome.values[inner];
   }
 
   @protected
@@ -4390,6 +4480,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_Chrono_Utc(deserializer));
+  }
+
+  @protected
+  AgentTurnOutcome sse_decode_box_autoadd_agent_turn_outcome(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_agent_turn_outcome(deserializer));
   }
 
   @protected
@@ -4904,6 +5002,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<AgentObservationDto> sse_decode_list_agent_observation_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <AgentObservationDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_agent_observation_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<AgentStateEntryDto> sse_decode_list_agent_state_entry_dto(
     SseDeserializer deserializer,
   ) {
@@ -5267,6 +5379,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_Chrono_Utc(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  AgentTurnOutcome? sse_decode_opt_box_autoadd_agent_turn_outcome(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_agent_turn_outcome(deserializer));
     } else {
       return null;
     }
@@ -6026,6 +6151,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_agent_observation_dto(
+    AgentObservationDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_session_id(self.sessionId, serializer);
+    sse_encode_agent_status_source(self.source, serializer);
+    sse_encode_i_64(self.observedAtMs, serializer);
+    sse_encode_opt_box_autoadd_agent_turn_outcome(self.lastOutcome, serializer);
+    sse_encode_u_32(self.completedTurns, serializer);
+    sse_encode_String(self.generation, serializer);
+  }
+
+  @protected
   void sse_encode_agent_state(AgentState self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
@@ -6047,8 +6186,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_agent_observation_dto(self.observations, serializer);
     sse_encode_list_agent_state_entry_dto(self.states, serializer);
     sse_encode_bool(self.commanderRunning, serializer);
+  }
+
+  @protected
+  void sse_encode_agent_status_source(
+    AgentStatusSource self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_agent_turn_outcome(
+    AgentTurnOutcome self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -6135,6 +6293,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_Chrono_Utc(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_agent_turn_outcome(
+    AgentTurnOutcome self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_agent_turn_outcome(self, serializer);
   }
 
   @protected
@@ -6588,6 +6755,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_agent_observation_dto(
+    List<AgentObservationDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_agent_observation_dto(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_agent_state_entry_dto(
     List<AgentStateEntryDto> self,
     SseSerializer serializer,
@@ -6928,6 +7107,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_Chrono_Utc(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_agent_turn_outcome(
+    AgentTurnOutcome? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_agent_turn_outcome(self, serializer);
     }
   }
 

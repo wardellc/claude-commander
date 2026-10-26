@@ -1,3 +1,5 @@
+import '../util/agent_status.dart';
+
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -244,7 +246,7 @@ class FleetStore extends ChangeNotifier {
     final counts = <String?, int>{};
     for (final store in _stores) {
       for (final s in store.sessions) {
-        if (store.agentStateFor(s.id) != AgentState.waitingForInput) continue;
+        if (!store.agentStateFor(s.id).needsAttention) continue;
         final ws = store.workspaceOfSession(s);
         counts[ws] = (counts[ws] ?? 0) + 1;
       }

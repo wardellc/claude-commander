@@ -21,8 +21,8 @@ pub enum SendDecision {
 /// Decide how to deliver the apply prompt given the agent's current state.
 pub fn decide_send(state: AgentState) -> SendDecision {
     match state {
-        AgentState::WaitingForInput => SendDecision::HoldUntilClear,
-        AgentState::Working | AgentState::Idle | AgentState::Unknown => SendDecision::Now,
+        state if state.needs_attention() => SendDecision::HoldUntilClear,
+        _ => SendDecision::Now,
     }
 }
 

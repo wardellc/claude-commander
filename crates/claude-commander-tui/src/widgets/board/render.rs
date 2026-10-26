@@ -2016,7 +2016,7 @@ mod tests {
             "body content must not be flush against the left border: {body}"
         );
         assert!(
-            body.contains("● idle"),
+            body.contains("● unknown"),
             "glyph should be followed by its status word: {body}"
         );
         // Buttons end one column short of the right border.

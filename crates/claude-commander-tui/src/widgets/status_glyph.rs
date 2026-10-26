@@ -54,15 +54,20 @@ pub fn session_status_glyph(
     }
     if status == SessionStatus::Running {
         match agent_state {
-            Some(AgentState::Working) => {
+            Some(state) if state.is_busy() => {
                 let step = tick as usize / 3;
                 let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
                 let color = theme.agent_working.color_for_tick(step as u64);
                 return Some((frame.to_string(), color));
             }
-            Some(AgentState::WaitingForInput) => {
+            Some(state) if state.needs_attention() => {
                 return Some(("?".to_string(), theme.agent_waiting));
             }
+            Some(AgentState::Failed | AgentState::RateLimited) => {
+                return Some(("!".to_string(), theme.agent_waiting));
+            }
+            Some(AgentState::Interrupted) => return Some(("■".to_string(), theme.status_running)),
+            Some(AgentState::Unknown) => return Some(("◌".to_string(), theme.status_stopped)),
             _ => {}
         }
         if unread {
@@ -90,8 +95,17 @@ pub fn status_label(
         SessionStatus::Running => match agent_state {
             Some(AgentState::Working) => "working…",
             Some(AgentState::WaitingForInput) => "waiting",
+            Some(AgentState::Starting) => "starting…",
+            Some(AgentState::WaitingForApproval) => "approval",
+            Some(AgentState::Compacting) => "compacting…",
+            Some(AgentState::Retrying) => "retrying…",
+            Some(AgentState::Failed) => "failed",
+            Some(AgentState::RateLimited) => "limited",
+            Some(AgentState::Interrupted) => "interrupted",
+            Some(AgentState::Unknown) => "unknown",
             _ if unread => "unread",
-            _ => "idle",
+            Some(AgentState::Idle) => "idle",
+            None => "unknown",
         },
         SessionStatus::Stopped => "stopped",
     }

@@ -349,7 +349,9 @@ impl AgentKind {
             // Codex prefixes the title with "Action Required" (no spinner) while
             // blocked on approval — check it before the shared spinner since the
             // two are mutually exclusive in Codex's title.
-            Self::Codex if title.contains("Action Required") => Some(AgentState::WaitingForInput),
+            Self::Codex if title.contains("Action Required") => {
+                Some(AgentState::WaitingForApproval)
+            }
             // Claude animates a quadrant-circle spinner, Codex a braille one.
             // Both arms accept either glyph set: the two never collide with an
             // idle title (Claude's is `✳ <name>`, Codex's a bare project name),
@@ -410,11 +412,11 @@ fn claude_content_state(content: &str) -> AgentState {
     for line in &lines {
         // Permission prompt footer.
         if line.contains("Esc to cancel") {
-            return AgentState::WaitingForInput;
+            return AgentState::WaitingForApproval;
         }
         // Rejection menu option.
         if line.contains("No, and tell Claude what to do differently") {
-            return AgentState::WaitingForInput;
+            return AgentState::WaitingForApproval;
         }
         // Selection menu: ❯ followed by a digit.
         if let Some(pos) = line.find('\u{276F}') {
@@ -427,14 +429,27 @@ fn claude_content_state(content: &str) -> AgentState {
 
     // Working: the in-flight turn's status line, which sits directly above the
     // composer and so falls inside the same last-10-lines window.
-    if lines
+    if let Some(line) = lines
         .iter()
-        .any(|line| CLAUDE_WORKING_STATUS_RE.is_match(line))
+        .find(|line| CLAUDE_WORKING_STATUS_RE.is_match(line))
     {
-        return AgentState::Working;
+        return live_status_activity(line);
     }
 
-    AgentState::Idle
+    // A short in-flight turn can have a bare spinner line without counters.
+    // That is ambiguous, not proof of idleness (see the regression below).
+    if lines.iter().any(|line| {
+        let line = line.trim();
+        line.chars().next().is_some_and(|c| "✽✻✶✳✢·".contains(c))
+            && (line.ends_with('…') || line.ends_with("..."))
+    }) {
+        return AgentState::Unknown;
+    }
+    if lines.iter().any(|line| line.trim() == "❯") {
+        AgentState::Idle
+    } else {
+        AgentState::Unknown
+    }
 }
 
 /// Codex content patterns. The approval overlay's question text is rendered in
@@ -447,12 +462,39 @@ fn codex_content_state(content: &str) -> AgentState {
         .iter()
         .any(|marker| content.contains(marker))
     {
-        return AgentState::WaitingForInput;
+        return AgentState::WaitingForApproval;
     }
-    if content.contains(CODEX_WORKING_MARKER) {
-        return AgentState::Working;
+    if let Some(line) = content
+        .lines()
+        .find(|line| line.contains(CODEX_WORKING_MARKER))
+    {
+        return live_status_activity(line);
     }
-    AgentState::Idle
+    if content
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(10)
+        .any(|line| line.trim() == "›")
+    {
+        AgentState::Idle
+    } else {
+        AgentState::Unknown
+    }
+}
+
+// Classify only a line already recognised as live status, never arbitrary
+// transcript prose mentioning compaction or retries. Tests pin this rule;
+// unfamiliar progress wording keeps the conservative Working classification.
+fn live_status_activity(line: &str) -> AgentState {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("compact") {
+        AgentState::Compacting
+    } else if lower.contains("retry") || lower.contains("reconnect") {
+        AgentState::Retrying
+    } else {
+        AgentState::Working
+    }
 }
 
 /// OpenCode content patterns. The interrupt hint is rendered in the footer while
@@ -585,6 +627,55 @@ fn omp_content_state(content: &str) -> AgentState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ambiguous_claude_and_codex_panes_are_unknown() {
+        for kind in [AgentKind::Claude, AgentKind::Codex] {
+            for content in ["", "Connecting…", "Some output without an input prompt"] {
+                assert_eq!(
+                    kind.content_state(content),
+                    AgentState::Unknown,
+                    "{kind:?}: {content:?}"
+                );
+            }
+        }
+        assert_eq!(
+            AgentKind::Claude.content_state("❯ implement feature\nConnecting…"),
+            AgentState::Unknown
+        );
+        assert_eq!(
+            AgentKind::Codex.content_state("› implement feature\nReconnecting…"),
+            AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn idle_requires_an_actual_input_prompt() {
+        assert_eq!(
+            AgentKind::Claude.content_state("Done.\n❯ \n"),
+            AgentState::Idle
+        );
+        assert_eq!(
+            AgentKind::Codex.content_state("Done.\n› \n"),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn specific_activity_requires_a_live_progress_line() {
+        assert_eq!(
+            AgentKind::Claude.content_state("✽ Compacting… (4s · ↓ 4 tokens)\n❯"),
+            AgentState::Compacting
+        );
+        assert_eq!(
+            AgentKind::Codex.content_state("• Reconnecting (2s • esc to interrupt)"),
+            AgentState::Retrying
+        );
+        assert_eq!(
+            AgentKind::Claude.content_state("I will discuss retrying and compaction.\n❯"),
+            AgentState::Idle
+        );
+    }
 
     // --- from_program ---
 
@@ -834,12 +925,12 @@ mod tests {
     fn title_state_codex_action_required_is_waiting() {
         assert_eq!(
             AgentKind::Codex.title_state("[ ! ] Action Required | my-project"),
-            Some(AgentState::WaitingForInput)
+            Some(AgentState::WaitingForApproval)
         );
         // Blink phase variant.
         assert_eq!(
             AgentKind::Codex.title_state("[ . ] Action Required"),
-            Some(AgentState::WaitingForInput)
+            Some(AgentState::WaitingForApproval)
         );
     }
 
@@ -1001,11 +1092,11 @@ mod tests {
     fn claude_content_waiting_patterns() {
         assert_eq!(
             AgentKind::Claude.content_state("Some output\n  Allow tool? Esc to cancel\n"),
-            AgentState::WaitingForInput
+            AgentState::WaitingForApproval
         );
         assert_eq!(
             AgentKind::Claude.content_state("Result\nNo, and tell Claude what to do differently\n"),
-            AgentState::WaitingForInput
+            AgentState::WaitingForApproval
         );
         assert_eq!(
             AgentKind::Claude.content_state("Choose:\n❯ 1. Allow once\n  2. Allow always\n"),
@@ -1020,7 +1111,7 @@ mod tests {
             AgentKind::Claude.content_state("Done editing files.\n\n❯ \n"),
             AgentState::Idle
         );
-        assert_eq!(AgentKind::Claude.content_state(""), AgentState::Idle);
+        assert_eq!(AgentKind::Claude.content_state(""), AgentState::Unknown);
     }
 
     #[test]
@@ -1048,7 +1139,7 @@ mod tests {
         let content = "✽ Boondoggling… (12s · ↓ 900 tokens)\nAllow tool? Esc to cancel\n";
         assert_eq!(
             AgentKind::Claude.content_state(content),
-            AgentState::WaitingForInput
+            AgentState::WaitingForApproval
         );
     }
 
@@ -1062,7 +1153,7 @@ mod tests {
         // from a live pane mid-turn (claude-code 2.1.228).
         assert_eq!(
             AgentKind::Claude.content_state("✽ Bunning…\n\n❯ \n"),
-            AgentState::Idle
+            AgentState::Unknown
         );
     }
 
@@ -1095,7 +1186,7 @@ mod tests {
     fn claude_content_strips_ansi_before_matching() {
         assert_eq!(
             AgentKind::Claude.content_state("\x1B[1mAllow?\x1B[0m \x1B[33mEsc to cancel\x1B[0m\n"),
-            AgentState::WaitingForInput
+            AgentState::WaitingForApproval
         );
         // The Working path needs the same guarantee: Claude colours the status
         // line, so the regex would never match un-stripped input.
@@ -1114,7 +1205,7 @@ mod tests {
             let content = format!("codex output\n\n{marker}\n\n  Yes   No\n");
             assert_eq!(
                 AgentKind::Codex.content_state(&content),
-                AgentState::WaitingForInput,
+                AgentState::WaitingForApproval,
                 "marker {marker:?} should signal WaitingForInput"
             );
         }
@@ -1126,7 +1217,7 @@ mod tests {
             AgentKind::Codex.content_state("Edited src/main.rs\nDone.\n› \n"),
             AgentState::Idle
         );
-        assert_eq!(AgentKind::Codex.content_state(""), AgentState::Idle);
+        assert_eq!(AgentKind::Codex.content_state(""), AgentState::Unknown);
     }
 
     #[test]
@@ -1146,7 +1237,7 @@ mod tests {
             "• Working (2s • esc to interrupt)\nWould you like to run the following command?\n";
         assert_eq!(
             AgentKind::Codex.content_state(content),
-            AgentState::WaitingForInput
+            AgentState::WaitingForApproval
         );
     }
 
@@ -1155,7 +1246,7 @@ mod tests {
         // The approval footer reads "esc to cancel", not "esc to interrupt",
         // so it must not be mistaken for the working hint.
         let content = "Press enter to confirm or esc to cancel\n";
-        assert_eq!(AgentKind::Codex.content_state(content), AgentState::Idle);
+        assert_eq!(AgentKind::Codex.content_state(content), AgentState::Unknown);
     }
 
     #[test]
@@ -1163,7 +1254,7 @@ mod tests {
         assert_eq!(
             AgentKind::Codex
                 .content_state("\x1B[1mWould you like to run the following command?\x1B[0m\n"),
-            AgentState::WaitingForInput
+            AgentState::WaitingForApproval
         );
     }
 
@@ -1484,7 +1575,7 @@ mod tests {
         // omp's hint must not leak into the other harnesses' detectors.
         assert_eq!(
             AgentKind::Codex.content_state(" \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n"),
-            AgentState::Idle
+            AgentState::Unknown
         );
         assert_eq!(
             AgentKind::OpenCode.content_state(" \u{2834} Working\u{2026} \u{27E6}esc\u{27E7}\n"),

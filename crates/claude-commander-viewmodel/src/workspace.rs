@@ -13,7 +13,9 @@
 //! fleet looks different on each.
 
 use claude_commander_protocol::api::{AgentStatesSnapshot, ProjectInfo, SessionInfo, Snapshot};
-use claude_commander_protocol::session::{AgentState, ProjectId};
+#[cfg(test)]
+use claude_commander_protocol::session::AgentState;
+use claude_commander_protocol::session::ProjectId;
 use claude_commander_protocol::workspace::{MAIN_WORKSPACE_LABEL, StartupWorkspace, WorkspaceDef};
 
 /// One workspace in the merged, cross-server list.
@@ -178,7 +180,11 @@ pub fn waiting_counts<'a>(
         .collect();
     for (snapshot, states) in backends {
         for session in &snapshot.sessions {
-            if states.states.get(&session.session_id) != Some(&AgentState::WaitingForInput) {
+            if !states
+                .states
+                .get(&session.session_id)
+                .is_some_and(|s| s.needs_attention())
+            {
                 continue;
             }
             let ws = session_workspace(snapshot, session);
@@ -530,6 +536,7 @@ mod tests {
         // The commander sentinel has no session, so it can never count.
         a_states.insert(SessionId::new(), AgentState::WaitingForInput);
         let a_agents = AgentStatesSnapshot {
+            observations: Default::default(),
             states: a_states,
             commander_running: true,
         };
@@ -538,6 +545,7 @@ mod tests {
         let wc = session(&work_b, "wc");
         let b = snapshot(vec![work_b], vec![wc.clone()], vec![], None);
         let b_agents = AgentStatesSnapshot {
+            observations: Default::default(),
             states: BTreeMap::from([(wc.session_id, AgentState::WaitingForInput)]),
             commander_running: false,
         };

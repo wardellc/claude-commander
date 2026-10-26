@@ -165,7 +165,7 @@ impl fmt::Display for SessionStatus {
     }
 }
 
-/// Sub-state of a Running Claude Code session, detected via pane content parsing.
+/// Live activity of a running managed agent, observed through hooks or its terminal.
 /// This is ephemeral (not persisted) and only meaningful when SessionStatus == Running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -179,6 +179,20 @@ pub enum AgentState {
     WaitingForInput,
     /// State could not be determined (non-Claude program, detection failure, etc.)
     Unknown,
+    /// The harness is establishing a session.
+    Starting,
+    /// A tool needs explicit permission from the operator.
+    WaitingForApproval,
+    /// The harness is compacting its context.
+    Compacting,
+    /// A provider request is being retried.
+    Retrying,
+    /// The last turn failed.
+    Failed,
+    /// A provider usage or rate limit prevented progress.
+    RateLimited,
+    /// The operator interrupted the last turn.
+    Interrupted,
 }
 
 impl fmt::Display for AgentState {
@@ -188,7 +202,37 @@ impl fmt::Display for AgentState {
             Self::Idle => write!(f, "idle"),
             Self::WaitingForInput => write!(f, "waiting"),
             Self::Unknown => write!(f, "unknown"),
+            Self::Starting => write!(f, "starting"),
+            Self::WaitingForApproval => write!(f, "waiting_for_approval"),
+            Self::Compacting => write!(f, "compacting"),
+            Self::Retrying => write!(f, "retrying"),
+            Self::Failed => write!(f, "failed"),
+            Self::RateLimited => write!(f, "rate_limited"),
+            Self::Interrupted => write!(f, "interrupted"),
         }
+    }
+}
+
+impl AgentState {
+    /// Whether work is still in flight (including startup and provider backoff).
+    pub fn is_busy(self) -> bool {
+        matches!(
+            self,
+            Self::Working | Self::Starting | Self::Compacting | Self::Retrying
+        )
+    }
+
+    /// Whether the operator must answer a question or grant permission.
+    pub fn needs_attention(self) -> bool {
+        matches!(self, Self::WaitingForInput | Self::WaitingForApproval)
+    }
+
+    /// Only positively identified idle/settled states may be hibernated.
+    pub fn is_settled(self) -> bool {
+        matches!(
+            self,
+            Self::Idle | Self::Failed | Self::RateLimited | Self::Interrupted
+        )
     }
 }
 

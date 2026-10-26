@@ -534,7 +534,7 @@ fn preflight_session(
 ) -> Result<()> {
     if let Some(state) = agent_states.get(&session) {
         match state {
-            AgentState::Working => {
+            state if state.is_busy() => {
                 return Err(SessionError::CascadePreflightFailed {
                     session,
                     reason: format!(
@@ -543,7 +543,7 @@ fn preflight_session(
                 }
                 .into());
             }
-            AgentState::WaitingForInput => {
+            state if state.needs_attention() => {
                 return Err(SessionError::CascadePreflightFailed {
                     session,
                     reason: format!(
@@ -552,7 +552,7 @@ fn preflight_session(
                 }
                 .into());
             }
-            AgentState::Idle | AgentState::Unknown => {}
+            _ => {}
         }
     }
 

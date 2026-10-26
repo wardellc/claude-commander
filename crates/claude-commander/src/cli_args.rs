@@ -51,6 +51,15 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Print an optional lifecycle-hook configuration fragment (merge with existing hooks).
+    AgentHooks {
+        /// Harness: claude or codex.
+        #[arg(value_parser = ["claude", "codex"])]
+        harness: String,
+    },
+    /// Receive a lifecycle hook on stdin. Used by AgentHooks configuration.
+    #[command(hide = true)]
+    AgentEvent,
     /// Start the interactive TUI (default)
     Tui,
 

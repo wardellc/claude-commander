@@ -499,6 +499,7 @@ fn test_info_view_session_with_pr() {
     terminal
         .draw(|frame| {
             let data = InfoSessionData {
+                agent_status: None,
                 title: "auth-session".into(),
                 branch: "feature-auth".into(),
                 created_at: "2026-04-01 12:00 UTC".into(),
@@ -560,6 +561,7 @@ fn test_info_view_long_text_wraps() {
     terminal
         .draw(|frame| {
             let data = InfoSessionData {
+                agent_status: None,
                 title: "test-session".into(),
                 branch: "test-branch".into(),
                 created_at: "2026-04-01 12:00 UTC".into(),
@@ -601,6 +603,7 @@ fn test_info_view_summary_placeholder() {
     terminal
         .draw(|frame| {
             let data = InfoSessionData {
+                agent_status: None,
                 title: "my-session".into(),
                 branch: "feature-x".into(),
                 created_at: "2026-04-10 09:00 UTC".into(),
@@ -1221,6 +1224,7 @@ fn test_preview_to_info_view_switch_no_clear() {
     terminal
         .draw(|frame| {
             let data = InfoSessionData {
+                agent_status: None,
                 title: "test-session".into(),
                 branch: "test-branch".into(),
                 created_at: "2026-04-01 12:00 UTC".into(),

@@ -254,6 +254,47 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Hooks must be inert outside a managed pane, and must not load config,
+    // create application directories, start telemetry, or write to the TUI.
+    if matches!(cli.command, Some(Commands::AgentEvent)) {
+        use claude_commander_core::agent_status::{
+            GENERATION_ENV, MAX_HOOK_BYTES, report_hook_payload,
+        };
+        use std::io::Read;
+        if let (Ok(pane), Ok(generation)) =
+            (std::env::var("TMUX_PANE"), std::env::var(GENERATION_ENV))
+        {
+            let mut input = String::new();
+            if std::io::stdin()
+                .take(MAX_HOOK_BYTES + 1)
+                .read_to_string(&mut input)
+                .is_ok()
+                && input.len() as u64 <= MAX_HOOK_BYTES
+                && let Ok(value) = serde_json::from_str(&input)
+            {
+                let _ = report_hook_payload(
+                    &claude_commander_core::tmux::TmuxExecutor::new(),
+                    &pane,
+                    &generation,
+                    &value,
+                )
+                .await;
+            }
+        }
+        // Codex Stop hooks require valid JSON even for a side-effect-only hook.
+        println!("{{}}");
+        return Ok(());
+    }
+    if let Some(Commands::AgentHooks { ref harness }) = cli.command {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &claude_commander_core::agent_status::hook_configuration(harness == "codex")
+            )?
+        );
+        return Ok(());
+    }
+
     // Load configuration
     let config = Config::load().unwrap_or_else(|e| {
         eprintln!("Warning: Failed to load config, using defaults: {}", e);
@@ -266,6 +307,9 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::AgentEvent | Commands::AgentHooks { .. }) => {
+            unreachable!("handled before configuration")
+        }
         None | Some(Commands::Tui) => {
             setup_logging(cli.debug, true)?;
             info!("Starting Claude Commander TUI v{}", VERSION);

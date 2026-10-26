@@ -172,11 +172,15 @@ body {
   border-radius: 50%;
   background: var(--grey);
 }
-.agent.working .dot {
+.agent.working .dot,
+.agent.starting .dot,
+.agent.compacting .dot,
+.agent.retrying .dot {
   background: var(--green);
   animation: pulse 1s infinite ease-in-out;
 }
-.agent.waiting_for_input .dot {
+.agent.waiting_for_input .dot,
+.agent.waiting_for_approval .dot {
   background: var(--yellow);
 }
 .agent.idle .dot {
@@ -1008,4 +1012,14 @@ button.ghost {
 .rv-file {
   content-visibility: auto;
   contain-intrinsic-size: auto 500px;
+}
+
+.agent.failed .dot,
+.agent.rate_limited .dot {
+  background: var(--red);
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent .dot {
+    animation: none;
+  }
 }

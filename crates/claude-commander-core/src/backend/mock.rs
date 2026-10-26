@@ -149,6 +149,7 @@ impl MockBackend {
             },
             snapshot: Mutex::new(snapshot),
             states: Mutex::new(AgentStatesSnapshot {
+                observations: Default::default(),
                 states: Default::default(),
                 commander_running: false,
             }),

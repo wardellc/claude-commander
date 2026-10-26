@@ -812,8 +812,8 @@ impl App {
             return None;
         }
         let sid = state.session_id;
-        let was_working = old_states.get(&sid) == Some(&AgentState::Working);
-        let now_idle = new_states.get(&sid) == Some(&AgentState::Idle);
+        let was_working = old_states.get(&sid).is_some_and(|s| s.is_busy());
+        let now_idle = new_states.get(&sid).is_some_and(|s| s.is_settled());
         (was_working && now_idle).then(|| (sid, state.title.clone(), state.content_hash))
     }
 

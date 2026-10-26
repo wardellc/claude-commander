@@ -144,13 +144,18 @@ async function poll(): Promise<void> {
   try {
     const [ws, agents] = await Promise.all([
       api.workspace(),
-      api.agentStates().catch(() => ({ states: {}, commander_running: false })),
+      api.agentStates().catch(() => ({ states: {}, observations: {}, commander_running: false })),
     ]);
     state.sessions = ws.sessions ?? [];
     state.projects = ws.projects ?? [];
     state.agentStates = agents?.states ?? {};
+    state.agentObservations = agents?.observations ?? {};
     showNotifications(
-      notifier.observe({ sessions: state.sessions, agentStates: state.agentStates }),
+      notifier.observe({
+        sessions: state.sessions,
+        agentStates: state.agentStates,
+        observations: state.agentObservations,
+      }),
       state.sessions,
       selectSession,
     );
@@ -220,6 +225,7 @@ function render(): void {
     projects: state.projects,
     sessions: state.sessions,
     agentStates: state.agentStates,
+    agentObservations: state.agentObservations,
     selectedId: state.selectedId,
     collapsed: state.collapsed,
   });
@@ -329,6 +335,8 @@ function renderInfo(): void {
     ["Branch", s.branch],
     ["Status", s.status],
     ["Agent", humanize(agentStateFor(state.agentStates, s))],
+    ["Last turn", state.agentObservations[s.id]?.last_outcome?.replaceAll("_", " ") ?? "unknown"],
+    ["Status source", state.agentObservations[s.id]?.source ?? "unknown"],
     ["Program", s.program],
     ["PR", s.pr_number ? `#${s.pr_number} (${s.pr_state})` : "—"],
     ["Section", s.current_section || "—"],

@@ -1,11 +1,11 @@
 ---
 source: crates/claude-commander-tui/src/widgets/board/render.rs
-assertion_line: 2154
+assertion_line: 2158
 expression: buffer_snapshot(&buf)
 ---
 "alpha                  1│In Progress (1)                                                  "
 "zeta                   2│┌ 1 one ────────────────────────────────────────────────────────┐"
-"                        ││ ● idle [feat]                                    [>_] [±] [i] │"
+"                        ││ ● unknown [feat]                                 [>_] [±] [i] │"
 "                        │└───────────────────────────────────────────────────────────────┘"
 "                        │                                                                 "
 "                        │                                                                 "

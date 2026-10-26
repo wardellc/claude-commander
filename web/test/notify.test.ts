@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { COMMANDER_SENTINEL_ID } from "../src/generated/constants.ts";
-import type { AgentState, SessionInfo } from "../src/generated/index.ts";
+import type { AgentState, AgentStatus, SessionInfo } from "../src/generated/index.ts";
 import { NotifyTracker } from "../src/notify.ts";
 
 function session(id: string, unread = false): SessionInfo {
@@ -11,6 +11,50 @@ function session(id: string, unread = false): SessionInfo {
 function poll(sessions: SessionInfo[], agentStates: Record<string, AgentState> = {}) {
   return { sessions, agentStates };
 }
+
+test("failures and limits notify as failures even when unread also changes", () => {
+  for (const state of ["failed", "rate_limited"] as const) {
+    const t = new NotifyTracker();
+    t.observe(poll([session("a")], { a: "working" }));
+    assert.deepEqual(t.observe(poll([session("a", true)], { a: state })), [
+      { key: "a", kind: "failed" },
+    ]);
+    assert.deepEqual(t.observe(poll([session("a", true)], { a: state })), []);
+  }
+});
+
+test("approval and user questions both need attention without duplicate notifications", () => {
+  const t = new NotifyTracker();
+  t.observe(poll([session("a")], { a: "working" }));
+  assert.deepEqual(t.observe(poll([session("a")], { a: "waiting_for_approval" })), [
+    { key: "a", kind: "needs_input" },
+  ]);
+  assert.deepEqual(t.observe(poll([session("a")], { a: "waiting_for_input" })), []);
+});
+
+test("a short failed turn is not reported as finished after work resumes", () => {
+  const t = new NotifyTracker();
+  t.observe(poll([session("a")], { a: "working" }));
+  assert.deepEqual(
+    t.observe({
+      ...poll([session("a", true)], { a: "working" }),
+      observations: { a: { last_outcome: "failed" } as AgentStatus },
+    }),
+    [{ key: "a", kind: "failed" }],
+  );
+});
+
+test("an unavailable inspection after interruption cannot notify successful completion", () => {
+  const t = new NotifyTracker();
+  t.observe(poll([session("a")], { a: "working" }));
+  assert.deepEqual(
+    t.observe({
+      ...poll([session("a", true)], { a: "unknown" }),
+      observations: { a: { last_outcome: "interrupted" } as AgentStatus },
+    }),
+    [],
+  );
+});
 
 describe("NotifyTracker", () => {
   test("the first poll only baselines", () => {

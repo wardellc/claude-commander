@@ -21,6 +21,7 @@ use claude_commander_core::session::SessionStatus;
 
 /// Data required to render the Info modal for a session.
 pub struct InfoSessionData<'a> {
+    pub agent_status: Option<&'a claude_commander_protocol::agent_status::AgentStatus>,
     pub title: String,
     pub branch: String,
     pub created_at: String,
@@ -140,6 +141,29 @@ impl<'a> InfoView<'a> {
             Span::styled(format!(" {}", data.status), value),
         ]));
 
+        if let Some(agent) = data.agent_status {
+            lines.push(Line::from(vec![
+                Span::styled(" Agent: ", label),
+                Span::styled(agent.state.to_string().replace('_', " "), value),
+            ]));
+            if let Some(outcome) = agent.last_outcome {
+                lines.push(Line::from(vec![
+                    Span::styled(" Last turn: ", label),
+                    Span::styled(outcome.to_string(), value),
+                ]));
+            }
+            let source = match agent.source {
+                claude_commander_protocol::agent_status::AgentStatusSource::Hook => "hook",
+                claude_commander_protocol::agent_status::AgentStatusSource::Terminal => "terminal",
+            };
+            let observed = chrono::DateTime::from_timestamp_millis(agent.observed_at_ms)
+                .map(|at| at.format("%H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "unknown".into());
+            lines.push(Line::from(vec![
+                Span::styled(" Observed: ", label),
+                Span::styled(format!("{observed} ({source})"), value),
+            ]));
+        }
         lines.push(Line::from(vec![
             Span::styled(" Program: ", label),
             Span::styled(data.program.clone(), value),
@@ -495,6 +519,7 @@ mod tests {
         let theme = test_theme();
         let diff = empty_diff();
         let data = InfoSessionData {
+            agent_status: None,
             title: "my-session".into(),
             branch: "feature-branch".into(),
             created_at: "2026-04-01 12:00 UTC".into(),
@@ -534,6 +559,7 @@ mod tests {
             body: "This PR adds auth.\nSecond line.".to_string(),
         };
         let data = InfoSessionData {
+            agent_status: None,
             title: "auth-session".into(),
             branch: "feature-auth".into(),
             created_at: "2026-04-01 12:00 UTC".into(),
@@ -563,6 +589,7 @@ mod tests {
         let theme = test_theme();
         let diff = empty_diff();
         let data = InfoSessionData {
+            agent_status: None,
             title: "test".into(),
             branch: "test".into(),
             created_at: "now".into(),
@@ -595,6 +622,7 @@ mod tests {
         let diff = empty_diff();
         let summary = AiSummary::Error("timed out".to_string());
         let data = InfoSessionData {
+            agent_status: None,
             title: "test".into(),
             branch: "test".into(),
             created_at: "now".into(),
@@ -657,6 +685,7 @@ mod tests {
         let theme = test_theme();
         let diff = empty_diff();
         let data = InfoSessionData {
+            agent_status: None,
             title: "test".into(),
             branch: "test".into(),
             created_at: "now".into(),

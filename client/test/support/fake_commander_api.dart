@@ -50,6 +50,7 @@ class FakeCommanderApi implements CommanderApi {
   bool healthTmuxResponse = true;
   List<SessionInfo> listSessionsResponse = const [];
   AgentStatesSnapshotDto agentStatesResponse = const AgentStatesSnapshotDto(
+    observations: [],
     states: [],
     commanderRunning: false,
   );

@@ -2909,6 +2909,27 @@ impl SseDecode for uuid::Uuid {
     }
 }
 
+impl SseDecode for crate::api::mirrors::AgentObservationDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <crate::api::mirrors::SessionId>::sse_decode(deserializer);
+        let mut var_source = <crate::api::mirrors::AgentStatusSource>::sse_decode(deserializer);
+        let mut var_observedAtMs = <i64>::sse_decode(deserializer);
+        let mut var_lastOutcome =
+            <Option<crate::api::mirrors::AgentTurnOutcome>>::sse_decode(deserializer);
+        let mut var_completedTurns = <u32>::sse_decode(deserializer);
+        let mut var_generation = <String>::sse_decode(deserializer);
+        return crate::api::mirrors::AgentObservationDto {
+            session_id: var_sessionId,
+            source: var_source,
+            observed_at_ms: var_observedAtMs,
+            last_outcome: var_lastOutcome,
+            completed_turns: var_completedTurns,
+            generation: var_generation,
+        };
+    }
+}
+
 impl SseDecode for crate::api::mirrors::AgentState {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2918,6 +2939,13 @@ impl SseDecode for crate::api::mirrors::AgentState {
             1 => crate::api::mirrors::AgentState::Idle,
             2 => crate::api::mirrors::AgentState::WaitingForInput,
             3 => crate::api::mirrors::AgentState::Unknown,
+            4 => crate::api::mirrors::AgentState::Starting,
+            5 => crate::api::mirrors::AgentState::WaitingForApproval,
+            6 => crate::api::mirrors::AgentState::Compacting,
+            7 => crate::api::mirrors::AgentState::Retrying,
+            8 => crate::api::mirrors::AgentState::Failed,
+            9 => crate::api::mirrors::AgentState::RateLimited,
+            10 => crate::api::mirrors::AgentState::Interrupted,
             _ => unreachable!("Invalid variant for AgentState: {}", inner),
         };
     }
@@ -2938,12 +2966,41 @@ impl SseDecode for crate::api::mirrors::AgentStateEntryDto {
 impl SseDecode for crate::api::mirrors::AgentStatesSnapshotDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_observations =
+            <Vec<crate::api::mirrors::AgentObservationDto>>::sse_decode(deserializer);
         let mut var_states =
             <Vec<crate::api::mirrors::AgentStateEntryDto>>::sse_decode(deserializer);
         let mut var_commanderRunning = <bool>::sse_decode(deserializer);
         return crate::api::mirrors::AgentStatesSnapshotDto {
+            observations: var_observations,
             states: var_states,
             commander_running: var_commanderRunning,
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::AgentStatusSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::mirrors::AgentStatusSource::Terminal,
+            1 => crate::api::mirrors::AgentStatusSource::Hook,
+            _ => unreachable!("Invalid variant for AgentStatusSource: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::mirrors::AgentTurnOutcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::mirrors::AgentTurnOutcome::Completed,
+            1 => crate::api::mirrors::AgentTurnOutcome::Failed,
+            2 => crate::api::mirrors::AgentTurnOutcome::RateLimited,
+            3 => crate::api::mirrors::AgentTurnOutcome::Interrupted,
+            _ => unreachable!("Invalid variant for AgentTurnOutcome: {}", inner),
         };
     }
 }
@@ -3534,6 +3591,20 @@ impl SseDecode for Vec<String> {
     }
 }
 
+impl SseDecode for Vec<crate::api::mirrors::AgentObservationDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::mirrors::AgentObservationDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::mirrors::AgentStateEntryDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3903,6 +3974,19 @@ impl SseDecode for Option<chrono::DateTime<chrono::Utc>> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<chrono::DateTime<chrono::Utc>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::mirrors::AgentTurnOutcome> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::mirrors::AgentTurnOutcome>::sse_decode(
+                deserializer,
+            ));
         } else {
             return None;
         }
@@ -4786,6 +4870,31 @@ fn pde_ffi_dispatcher_sync_impl(
 // Section: rust2dart
 
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::mirrors::AgentObservationDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.session_id.into_into_dart().into_dart(),
+            self.source.into_into_dart().into_dart(),
+            self.observed_at_ms.into_into_dart().into_dart(),
+            self.last_outcome.into_into_dart().into_dart(),
+            self.completed_turns.into_into_dart().into_dart(),
+            self.generation.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::mirrors::AgentObservationDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::mirrors::AgentObservationDto>
+    for crate::api::mirrors::AgentObservationDto
+{
+    fn into_into_dart(self) -> crate::api::mirrors::AgentObservationDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::AgentState> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self.0 {
@@ -4793,6 +4902,13 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::AgentStat
             crate::api::mirrors::AgentState::Idle => 1.into_dart(),
             crate::api::mirrors::AgentState::WaitingForInput => 2.into_dart(),
             crate::api::mirrors::AgentState::Unknown => 3.into_dart(),
+            crate::api::mirrors::AgentState::Starting => 4.into_dart(),
+            crate::api::mirrors::AgentState::WaitingForApproval => 5.into_dart(),
+            crate::api::mirrors::AgentState::Compacting => 6.into_dart(),
+            crate::api::mirrors::AgentState::Retrying => 7.into_dart(),
+            crate::api::mirrors::AgentState::Failed => 8.into_dart(),
+            crate::api::mirrors::AgentState::RateLimited => 9.into_dart(),
+            crate::api::mirrors::AgentState::Interrupted => 10.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -4833,6 +4949,7 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::mirrors::AgentStateEntryDto>
 impl flutter_rust_bridge::IntoDart for crate::api::mirrors::AgentStatesSnapshotDto {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
+            self.observations.into_into_dart().into_dart(),
             self.states.into_into_dart().into_dart(),
             self.commander_running.into_into_dart().into_dart(),
         ]
@@ -4848,6 +4965,50 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::mirrors::AgentStatesSnapshotD
 {
     fn into_into_dart(self) -> crate::api::mirrors::AgentStatesSnapshotDto {
         self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::AgentStatusSource> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::mirrors::AgentStatusSource::Terminal => 0.into_dart(),
+            crate::api::mirrors::AgentStatusSource::Hook => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::AgentStatusSource>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::AgentStatusSource>>
+    for crate::api::mirrors::AgentStatusSource
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::AgentStatusSource> {
+        self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::AgentTurnOutcome> {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self.0 {
+            crate::api::mirrors::AgentTurnOutcome::Completed => 0.into_dart(),
+            crate::api::mirrors::AgentTurnOutcome::Failed => 1.into_dart(),
+            crate::api::mirrors::AgentTurnOutcome::RateLimited => 2.into_dart(),
+            crate::api::mirrors::AgentTurnOutcome::Interrupted => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for FrbWrapper<crate::api::mirrors::AgentTurnOutcome>
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::AgentTurnOutcome>>
+    for crate::api::mirrors::AgentTurnOutcome
+{
+    fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::AgentTurnOutcome> {
+        self.into()
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -6538,6 +6699,18 @@ impl SseEncode for uuid::Uuid {
     }
 }
 
+impl SseEncode for crate::api::mirrors::AgentObservationDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::mirrors::SessionId>::sse_encode(self.session_id, serializer);
+        <crate::api::mirrors::AgentStatusSource>::sse_encode(self.source, serializer);
+        <i64>::sse_encode(self.observed_at_ms, serializer);
+        <Option<crate::api::mirrors::AgentTurnOutcome>>::sse_encode(self.last_outcome, serializer);
+        <u32>::sse_encode(self.completed_turns, serializer);
+        <String>::sse_encode(self.generation, serializer);
+    }
+}
+
 impl SseEncode for crate::api::mirrors::AgentState {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -6547,6 +6720,13 @@ impl SseEncode for crate::api::mirrors::AgentState {
                 crate::api::mirrors::AgentState::Idle => 1,
                 crate::api::mirrors::AgentState::WaitingForInput => 2,
                 crate::api::mirrors::AgentState::Unknown => 3,
+                crate::api::mirrors::AgentState::Starting => 4,
+                crate::api::mirrors::AgentState::WaitingForApproval => 5,
+                crate::api::mirrors::AgentState::Compacting => 6,
+                crate::api::mirrors::AgentState::Retrying => 7,
+                crate::api::mirrors::AgentState::Failed => 8,
+                crate::api::mirrors::AgentState::RateLimited => 9,
+                crate::api::mirrors::AgentState::Interrupted => 10,
                 _ => {
                     unimplemented!("");
                 }
@@ -6567,8 +6747,43 @@ impl SseEncode for crate::api::mirrors::AgentStateEntryDto {
 impl SseEncode for crate::api::mirrors::AgentStatesSnapshotDto {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::mirrors::AgentObservationDto>>::sse_encode(self.observations, serializer);
         <Vec<crate::api::mirrors::AgentStateEntryDto>>::sse_encode(self.states, serializer);
         <bool>::sse_encode(self.commander_running, serializer);
+    }
+}
+
+impl SseEncode for crate::api::mirrors::AgentStatusSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::mirrors::AgentStatusSource::Terminal => 0,
+                crate::api::mirrors::AgentStatusSource::Hook => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::mirrors::AgentTurnOutcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::mirrors::AgentTurnOutcome::Completed => 0,
+                crate::api::mirrors::AgentTurnOutcome::Failed => 1,
+                crate::api::mirrors::AgentTurnOutcome::RateLimited => 2,
+                crate::api::mirrors::AgentTurnOutcome::Interrupted => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -7054,6 +7269,16 @@ impl SseEncode for Vec<String> {
     }
 }
 
+impl SseEncode for Vec<crate::api::mirrors::AgentObservationDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::mirrors::AgentObservationDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::mirrors::AgentStateEntryDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7349,6 +7574,16 @@ impl SseEncode for Option<chrono::DateTime<chrono::Utc>> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <chrono::DateTime<chrono::Utc>>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::mirrors::AgentTurnOutcome> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::mirrors::AgentTurnOutcome>::sse_encode(value, serializer);
         }
     }
 }

@@ -182,7 +182,10 @@ impl TmuxExecutor {
         // (the shell, then `claude` itself) see Claude Commander instead.
         let version = env!("CARGO_PKG_VERSION");
         let wrapped_cmd = command.map(|cmd| {
-            format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}")
+            let generation = uuid::Uuid::new_v4();
+            // The generation is set by the pane's own shell before the harness
+            // starts, so even its first hook can identify this exact launch.
+            format!("export CC_AGENT_GENERATION='{generation}'; tmux set-option -p -t \"$TMUX_PANE\" @cc_agent_generation \"$CC_AGENT_GENERATION\"; TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}")
         });
 
         // Enable remain-on-exit globally BEFORE the new session's pane is

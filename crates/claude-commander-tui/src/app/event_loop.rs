@@ -129,11 +129,7 @@ impl App {
                                 .sessions
                                 .iter()
                                 .any(|s| s.status == SessionStatus::Creating)
-                                || h.view
-                                    .agent_states
-                                    .states
-                                    .values()
-                                    .any(|s| *s == AgentState::Working)
+                                || h.view.agent_states.states.values().any(|s| s.is_busy())
                         });
                 }
                 if let Some(crate::digit_accumulator::DigitResult::Jump(n)) =

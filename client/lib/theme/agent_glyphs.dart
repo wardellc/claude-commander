@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../src/rust/api/mirrors.dart';
 import 'tokens.dart';
+import '../util/agent_status.dart';
 
 /// A resolved visual descriptor for a session/agent state: the glyph shown in
 /// the leading column of a list row, its [SessionTone], and a short lower-case
@@ -59,24 +60,32 @@ StateDescriptor sessionDescriptor(SessionInfo info, AgentState agent) {
     case SessionStatus.running:
       break;
   }
-  // Running: the live agent sub-state drives the glyph.
-  switch (agent) {
-    case AgentState.waitingForInput:
-      return const StateDescriptor('?', SessionTone.waiting, 'waiting');
-    case AgentState.working:
-      return const StateDescriptor(
-        '●',
-        SessionTone.working,
-        'working',
-        pulse: true,
-      );
-    case AgentState.idle:
-    case AgentState.unknown:
-      if (info.unread) {
-        return const StateDescriptor('◆', SessionTone.unread, 'unread');
-      }
-      return const StateDescriptor('●', SessionTone.idle, 'idle');
+  // Running: requests and failures outrank unread markers.
+  if (agent.needsAttention) {
+    return StateDescriptor(
+      '?',
+      SessionTone.waiting,
+      agent == AgentState.waitingForInput ? 'waiting' : agent.statusLabel,
+    );
   }
+  if (agent.isFailure) {
+    return StateDescriptor('!', SessionTone.waiting, agent.statusLabel);
+  }
+  if (agent.isBusy) {
+    return StateDescriptor(
+      '●',
+      SessionTone.working,
+      agent.statusLabel,
+      pulse: true,
+    );
+  }
+  if (agent == AgentState.interrupted) {
+    return const StateDescriptor('■', SessionTone.idle, 'interrupted');
+  }
+  if (info.unread) {
+    return const StateDescriptor('◆', SessionTone.unread, 'unread');
+  }
+  return StateDescriptor('●', SessionTone.idle, agent.statusLabel);
 }
 
 /// The leading state glyph as a fixed-width coloured cell, matching the deck's

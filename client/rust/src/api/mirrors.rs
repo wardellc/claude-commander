@@ -24,6 +24,12 @@ pub use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
 pub use claude_commander_protocol::approval::{ApprovalStatus, ApprovalRuleKind, ApprovalRule, ApprovalSummary};
 pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
+pub use claude_commander_protocol::agent_status::{AgentStatusSource, AgentTurnOutcome};
+
+#[frb(mirror(AgentStatusSource))]
+pub enum _AgentStatusSource { Terminal, Hook }
+#[frb(mirror(AgentTurnOutcome))]
+pub enum _AgentTurnOutcome { Completed, Failed, RateLimited, Interrupted }
 pub use claude_commander_protocol::workspace::WorkspaceDef;
 pub use claude_commander_protocol::ws::AttachKind;
 
@@ -140,6 +146,13 @@ pub enum _AgentState {
     Idle,
     WaitingForInput,
     Unknown,
+    Starting,
+    WaitingForApproval,
+    Compacting,
+    Retrying,
+    Failed,
+    RateLimited,
+    Interrupted,
 }
 
 #[frb(mirror(SessionDetail))]
@@ -419,7 +432,17 @@ pub struct AgentStateEntryDto {
 
 /// Bulk agent-state snapshot, map flattened to a `Vec` with the synthetic
 /// commander sentinel entry stripped (its running-ness is `commander_running`).
+pub struct AgentObservationDto {
+    pub session_id: SessionId,
+    pub source: AgentStatusSource,
+    pub observed_at_ms: i64,
+    pub last_outcome: Option<AgentTurnOutcome>,
+    pub completed_turns: u32,
+    pub generation: String,
+}
+
 pub struct AgentStatesSnapshotDto {
+    pub observations: Vec<AgentObservationDto>,
     pub states: Vec<AgentStateEntryDto>,
     pub commander_running: bool,
 }
@@ -427,6 +450,16 @@ pub struct AgentStatesSnapshotDto {
 impl From<AgentStatesSnapshot> for AgentStatesSnapshotDto {
     fn from(s: AgentStatesSnapshot) -> Self {
         Self {
+            observations: s.observations.into_iter()
+                .filter(|(id, _)| *id != COMMANDER_SENTINEL_ID)
+                .map(|(session_id, o)| AgentObservationDto {
+                    session_id,
+                    source: o.source,
+                    observed_at_ms: o.observed_at_ms,
+                    last_outcome: o.last_outcome,
+                    completed_turns: o.completed_turns,
+                    generation: o.generation,
+                }).collect(),
             states: s
                 .states
                 .into_iter()
@@ -748,6 +781,7 @@ mod tests {
         states.insert(real, AgentState::Working);
         states.insert(COMMANDER_SENTINEL_ID, AgentState::Idle);
         let dto: AgentStatesSnapshotDto = AgentStatesSnapshot {
+            observations: Default::default(),
             states,
             commander_running: true,
         }

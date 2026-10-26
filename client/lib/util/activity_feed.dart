@@ -1,3 +1,4 @@
+import 'agent_status.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import 'session_filter.dart' show SessionStatusActive;
@@ -131,7 +132,13 @@ List<ActivityEvent> buildActivityFeed(
       if (where != null && !where(store, s)) continue;
       final agent = store.agentStateFor(s.id);
 
-      final state = _stateEvent(s, agent, serverId, serverName);
+      final state = _stateEvent(
+        s,
+        agent,
+        serverId,
+        serverName,
+        store.agentObservationFor(s.id)?.lastOutcome,
+      );
       if (state != null) events.add(state);
 
       final pr = _prEvent(s, serverId, serverName);
@@ -195,6 +202,7 @@ ActivityEvent? _stateEvent(
   AgentState agent,
   String serverId,
   String serverName,
+  AgentTurnOutcome? lastOutcome,
 ) {
   final at = s.enteredSectionAt ?? s.lastAttachedAt ?? s.createdAt;
 
@@ -221,14 +229,33 @@ ActivityEvent? _stateEvent(
   // The agent sub-state only carries meaning while running (mirrors
   // `sessionDescriptor`).
   if (s.status != SessionStatus.running) return null;
+  if (agent.isFailure) {
+    return make(ActivityKind.needsYou, agent.statusLabel, true);
+  }
   switch (agent) {
+    case AgentState.waitingForApproval:
+      return make(ActivityKind.needsYou, 'pending approval', true);
     case AgentState.waitingForInput:
       return make(ActivityKind.needsYou, 'waiting for input', true);
+    case AgentState.starting:
+    case AgentState.compacting:
+    case AgentState.retrying:
     case AgentState.working:
-      return make(ActivityKind.working, 'working', false);
+      return make(ActivityKind.working, agent.statusLabel, false);
+    case AgentState.failed:
+    case AgentState.rateLimited:
+    case AgentState.interrupted:
+      return null;
     case AgentState.idle:
     case AgentState.unknown:
       if (s.unread) {
+        if (lastOutcome == AgentTurnOutcome.failed ||
+            lastOutcome == AgentTurnOutcome.rateLimited) {
+          return make(ActivityKind.needsYou, outcomeLabel(lastOutcome!), true);
+        }
+        if (lastOutcome == AgentTurnOutcome.interrupted) {
+          return null;
+        }
         return make(ActivityKind.finishedUnread, 'finished · unread', false);
       }
       return null;
