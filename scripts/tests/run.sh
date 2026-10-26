@@ -551,5 +551,6 @@ cc_kill_process_groups "$group_leader" 2>/dev/null || group_rc=$?
 assert_eq "0" "$group_rc" "a group that is already gone is not an error"
 
 echo
+bash "$REPO_ROOT/scripts/tests/build-artifacts.sh"
 printf '%s passed, %s failed\n' "$pass_count" "$fail_count"
 [ "$fail_count" -eq 0 ] || exit 1

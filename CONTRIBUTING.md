@@ -33,6 +33,19 @@ The AUR job depends on:
 
 ## Development
 
+Use `scripts/build.sh` for final verification. By default it clears the current
+checkout's Rust and Flutter build directories first, retaining only that run's
+artifacts. Downloads and source changes are preserved. Pass verification flags
+through unchanged, for example `CC_FORCE_NIX=1 scripts/build.sh --all`.
+
+For faster iteration or to retain earlier Cargo variants, use
+`scripts/build.sh --keep-builds --fast` (or keep using the focused checks below).
+Fresh builds recompile dependencies. The wrapper also defaults Rust development
+and test debug symbols and incremental compilation off; explicit Cargo environment
+overrides are respected. `--keep-builds` preserves caches, not executable snapshots.
+Run builds sequentially within each checkout, and finish a task with a fresh run.
+See [the agent build policy](CLAUDE.md#verifying) for details.
+
 ```bash
 # Everything CI checks for Rust: fmt, clippy, build, test
 scripts/verify.sh

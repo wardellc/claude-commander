@@ -8,6 +8,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Verifying
 
+**Build retention:** use `scripts/build.sh` for a task's final verification. It
+removes this checkout's previous `target/`, `client/rust/target/` and
+`client/build/` before forwarding arguments to `verify.sh`, leaving only the
+current invocation's artifacts. It keeps package download caches, source files,
+branches and worktrees. No scheduled cleanup is involved.
+
+- `scripts/build.sh --all` — fresh full verification; default to this at handoff.
+- `scripts/build.sh --keep-builds --fast` — retain existing artifacts for a fast
+  edit loop; the same opt-out works with any verification arguments.
+- For a comparison or investigation requiring older variants, use
+  `--keep-builds` and say why. It retains Cargo's caches and variants, not immutable
+  snapshots of executables; copy a binary elsewhere if its exact contents matter.
+
+Fresh verification recompiles dependencies, so it costs more time than reuse.
+The wrapper defaults development/test debug symbols and Rust incremental output
+off; explicitly set `CARGO_PROFILE_DEV_DEBUG=2`, `CARGO_PROFILE_TEST_DEBUG=2` or
+`CARGO_INCREMENTAL=1` when debugging requires them. Release settings are unchanged.
+Run one build/check command at a time in a checkout: `build.sh` rejects another
+`build.sh` run, but direct Cargo/Flutter/`verify.sh` calls do not take its lock.
+Never run cleanup against another session's checkout. Intermediate focused
+checks can still use `verify.sh`; finish with `build.sh` to discard older variants.
+Fresh mode rejects Cargo configurations that redirect build output outside the
+checkout's normal `target/` directories; use `--keep-builds` for shared caches.
+
 `scripts/verify.sh`'s lanes mirror `.github/workflows/ci.yml`, so a green `--all` means a green PR. `--all` is a *superset* of CI, though: it also runs `shellcheck`, the script `selftest`, and the `e2e` that CI cannot. A red lane there does not imply red CI.
 
 - `scripts/verify.sh` — the Rust lanes: fmt, clippy, build, test

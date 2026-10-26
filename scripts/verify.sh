@@ -70,7 +70,7 @@ export TERM=xterm-256color
 # says why a global file and not GIT_CONFIG_COUNT): a fixture that forgets the
 # opt-out fails here, at once, on every machine. ci.yml's test steps use the same
 # file. Under target/, like the logs, so it outlives the run for a re-run by hand.
-cc_export_poisoned_git_signing "$CC_REPO_ROOT/target/verify-gitconfig"
+# Exported after argument validation, so build.sh can validate before cleaning.
 
 FORCE_E2E=0
 GOLDENS_UPDATE=0
@@ -451,6 +451,7 @@ select_tier() {
 }
 
 TIER_SET=0
+SINGLE_CRATE_ARGS=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -524,13 +525,21 @@ while [ "$#" -gt 0 ]; do
       # so instead of silently discarding a tier the caller asked for.
       [ "$TIER_SET" -eq 1 ] && cc_warn "-p runs one crate's tests only; ignoring the tier flags"
       shift
-      run_single_crate "$@"
-      exit $?
+      SINGLE_CRATE_ARGS=("$@")
+      break
       ;;
     -*) cc_die "$CC_EXIT_USAGE" "unknown option '$1' (see --help)" ;;
     *) cc_die "$CC_EXIT_USAGE" "unexpected argument '$1' (see --help)" ;;
   esac
 done
+
+if [ "${#SINGLE_CRATE_ARGS[@]}" -gt 0 ]; then
+  cc_crate_for_alias "${SINGLE_CRATE_ARGS[0]}" >/dev/null || exit "$CC_EXIT_USAGE"
+  [ "${CC_VERIFY_CHECK_ARGS_ONLY:-0}" = 1 ] && exit 0
+  cc_export_poisoned_git_signing "$CC_REPO_ROOT/target/verify-gitconfig"
+  run_single_crate "${SINGLE_CRATE_ARGS[@]}"
+  exit $?
+fi
 
 [ "$TIER_SET" -eq 1 ] || select_tier rust
 
@@ -539,6 +548,10 @@ done
 if [ "$GOLDENS_UPDATE" -eq 1 ] && [ -z "${SELECTED[goldens]:-}" ]; then
   cc_die "$CC_EXIT_USAGE" "--update only applies to --goldens"
 fi
+
+# Internal preflight used by build.sh: no toolchain entry or output-tree writes.
+[ "${CC_VERIFY_CHECK_ARGS_ONLY:-0}" = 1 ] && exit 0
+cc_export_poisoned_git_signing "$CC_REPO_ROOT/target/verify-gitconfig"
 
 # Emit in the canonical run order so flag combinations cannot reorder lanes or run
 # one twice. Note this is cc_lane_run_order, not the `all` tier: a lane that lives
