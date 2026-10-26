@@ -176,6 +176,7 @@ impl CommanderService {
             glab_available: Arc::new(tokio::sync::OnceCell::new()),
             agent_detector,
             agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
+                observations: Default::default(),
                 states: BTreeMap::new(),
                 commander_running: false,
             })),
@@ -2455,9 +2456,11 @@ impl CommanderService {
                 &commander_program,
             );
             let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
+            detector.seed_observations(self.agent_states_cache.read().await.observations.clone());
             let states = detector.detect_all(&active).await;
             let mut cache = self.agent_states_cache.write().await;
             cache.states = states;
+            cache.observations = detector.observations();
             cache.commander_running = commander_running;
             self.agent_states_primed
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2470,9 +2473,10 @@ impl CommanderService {
             return self.agent_states_cache.read().await.clone();
         }
         let active = self.active_session_targets().await;
-        let states = {
+        let (states, observations) = {
             let mut detector = self.agent_detector.lock().await;
-            detector.detect_all(&active).await
+            let states = detector.detect_all(&active).await;
+            (states, detector.observations())
         };
         // Mirror the fresh/loop arms: never fabricate `commander_running`.
         // `is_running` short-circuits when the commander is disabled, so no
@@ -2481,6 +2485,7 @@ impl CommanderService {
         let commander_running =
             commander_enabled && crate::commander::is_running(&self.manager.tmux).await;
         AgentStatesSnapshot {
+            observations,
             states,
             commander_running,
         }
@@ -2494,7 +2499,10 @@ impl CommanderService {
     async fn clear_stale_agent_states(&self) -> bool {
         let had_states = !self.agent_states_cache.read().await.states.is_empty();
         if had_states {
-            self.agent_states_cache.write().await.states.clear();
+            let mut cache = self.agent_states_cache.write().await;
+            cache.states.clear();
+            cache.observations.clear();
+            drop(cache);
             self.store.notify_change();
         }
         had_states
@@ -2687,12 +2695,16 @@ impl CommanderService {
                 // Diff against the previous cache to flag agents that just
                 // finished a turn (Working→Idle), skipping the commander
                 // sentinel (it has no `WorktreeSession` to mark).
-                let prev = { cache.read().await.states.clone() };
-                let unread_ids: Vec<SessionId> = detect_unread_transitions(&prev, &states)
-                    .into_iter()
-                    .filter(|id| *id != sentinel)
-                    .collect();
-                let states_changed = states != prev;
+                let previous = cache.read().await.clone();
+                let prev = &previous.states;
+                let observations = detector.observations();
+                let unread_ids: Vec<SessionId> =
+                    detect_status_unread_transitions(&previous, &states, &observations)
+                        .into_iter()
+                        .filter(|id| *id != sentinel)
+                        .collect();
+                let states_changed =
+                    states != *prev || !same_agent_activity(&previous.observations, &observations);
 
                 // Only write the cache when something changed: a rebuilt-but-
                 // identical map would serialize identically anyway (BTreeMap,
@@ -2701,9 +2713,8 @@ impl CommanderService {
                 // and avoids needless lock traffic on all-idle ticks.
                 {
                     let mut c = cache.write().await;
-                    if states_changed {
-                        c.states = states;
-                    }
+                    c.states = states;
+                    c.observations = observations;
                     c.commander_running = commander_running;
                 }
                 primed.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3148,8 +3159,88 @@ fn pr_check_debounce_passed(
     last_check.is_none_or(|t| now.saturating_duration_since(t) >= debounce)
 }
 
-/// Session ids whose agent just finished a turn: present as [`AgentState::Idle`]
-/// now but [`AgentState::Working`] in the previous poll. Drives the unread
+fn same_agent_activity(
+    a: &BTreeMap<SessionId, claude_commander_protocol::agent_status::AgentStatus>,
+    b: &BTreeMap<SessionId, claude_commander_protocol::agent_status::AgentStatus>,
+) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|(id, status)| b.get(id).is_some_and(|other| status.same_activity(other)))
+}
+
+fn detect_status_unread_transitions(
+    previous: &AgentStatesSnapshot,
+    states: &BTreeMap<SessionId, AgentState>,
+    observations: &BTreeMap<SessionId, claude_commander_protocol::agent_status::AgentStatus>,
+) -> Vec<SessionId> {
+    let mut ids: Vec<_> = detect_unread_transitions(&previous.states, states)
+        .into_iter()
+        .filter(|id| {
+            previous
+                .observations
+                .get(id)
+                .zip(observations.get(id))
+                .is_none_or(|(before, after)| before.generation == after.generation)
+        })
+        .collect();
+    for (id, status) in observations {
+        if let Some(before) = previous.observations.get(id)
+            && before.generation == status.generation
+            && status.completed_turns > before.completed_turns
+            && !ids.contains(id)
+        {
+            ids.push(*id);
+        }
+    }
+    ids
+}
+
+#[cfg(test)]
+mod agent_observation_tests {
+    use super::*;
+    use crate::agent_status::{HookEvent, apply_hook};
+    use claude_commander_protocol::agent_status::AgentStatus;
+
+    #[test]
+    fn short_turns_are_unread_without_a_working_to_idle_poll_edge() {
+        let id = SessionId::new();
+        let before = apply_hook(None, "launch", HookEvent::Working, 1);
+        let completed = apply_hook(Some(&before), "launch", HookEvent::Completed, 2);
+        let after = apply_hook(Some(&completed), "launch", HookEvent::Working, 3);
+        let previous = AgentStatesSnapshot {
+            states: BTreeMap::from([(id, AgentState::Working)]),
+            observations: BTreeMap::from([(id, before)]),
+            commander_running: false,
+        };
+        let states = BTreeMap::from([(id, AgentState::Working)]);
+        assert_eq!(
+            detect_status_unread_transitions(&previous, &states, &BTreeMap::from([(id, after)])),
+            vec![id]
+        );
+    }
+
+    #[test]
+    fn initial_observation_or_relaunch_cannot_create_historical_unread() {
+        let id = SessionId::new();
+        let completed = apply_hook(None, "new", HookEvent::Completed, 2);
+        let states = BTreeMap::from([(id, AgentState::Idle)]);
+        let mut previous = AgentStatesSnapshot {
+            states: BTreeMap::new(),
+            observations: BTreeMap::new(),
+            commander_running: false,
+        };
+        let observations = BTreeMap::from([(id, completed)]);
+        assert!(detect_status_unread_transitions(&previous, &states, &observations).is_empty());
+        let mut old = AgentStatus::terminal(AgentState::Working, 1);
+        old.generation = "old".into();
+        previous.states.insert(id, AgentState::Working);
+        previous.observations.insert(id, old);
+        assert!(detect_status_unread_transitions(&previous, &states, &observations).is_empty());
+    }
+}
+
+/// Session ids newly settled after an in-flight state. This terminal fallback
+/// supplements the hook completion counter. Drives the unread
 /// marker. An empty `prev` (never polled, or cleared after an attach) yields no
 /// transitions, so a freshly-populated baseline can't produce false unread.
 pub fn detect_unread_transitions(
@@ -3157,9 +3248,7 @@ pub fn detect_unread_transitions(
     new: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionId> {
     new.iter()
-        .filter(|(id, state)| {
-            **state == AgentState::Idle && prev.get(id) == Some(&AgentState::Working)
-        })
+        .filter(|(id, state)| state.is_settled() && prev.get(id).is_some_and(|s| s.is_busy()))
         .map(|(id, _)| *id)
         .collect()
 }

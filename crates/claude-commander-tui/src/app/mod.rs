@@ -159,6 +159,7 @@ async fn fetch_and_send_backend_change(
         }
     };
     let states = states.unwrap_or_else(|_| claude_commander_core::api::AgentStatesSnapshot {
+        observations: Default::default(),
         states: Default::default(),
         commander_running: false,
     });

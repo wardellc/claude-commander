@@ -2,11 +2,18 @@
 // tab). `NotifyTracker` decides *what* changed between two polls — pure, so
 // `node --test` covers it; `showNotifications` is the browser side.
 
+import { isFailure, needsAttention } from "./agent_status.ts";
 import { COMMANDER_SENTINEL_ID } from "./generated/constants.ts";
-import type { AgentState, SessionId, SessionInfo } from "./generated/index.ts";
+import type {
+  AgentState,
+  AgentStatus,
+  AgentTurnOutcome,
+  SessionId,
+  SessionInfo,
+} from "./generated/index.ts";
 import { agentStateFor } from "./state.ts";
 
-export type NotifyKind = "needs_input" | "finished";
+export type NotifyKind = "needs_input" | "finished" | "failed";
 
 export interface NotifyEvent {
   /** The session's id. */
@@ -17,11 +24,13 @@ export interface NotifyEvent {
 export interface Poll {
   sessions: readonly SessionInfo[];
   agentStates: Partial<Record<SessionId, AgentState>>;
+  observations?: Partial<Record<SessionId, AgentStatus>>;
 }
 
 interface Seen {
   unread: boolean;
   agent: AgentState;
+  outcome: AgentTurnOutcome | null;
 }
 
 /**
@@ -46,7 +55,11 @@ export class NotifyTracker {
     const next = new Map<string, Seen>();
     for (const s of poll.sessions) {
       if (s.id === COMMANDER_SENTINEL_ID || s.session_id === COMMANDER_SENTINEL_ID) continue;
-      next.set(s.id, { unread: s.unread, agent: agentStateFor(poll.agentStates, s) });
+      next.set(s.id, {
+        unread: s.unread,
+        agent: agentStateFor(poll.agentStates, s),
+        outcome: poll.observations?.[s.id]?.last_outcome ?? null,
+      });
     }
     const prev = this.prev;
     this.prev = next;
@@ -56,10 +69,21 @@ export class NotifyTracker {
     for (const [key, now] of next) {
       const before = prev.get(key);
       if (!before) continue;
-      if (now.agent === "waiting_for_input" && before.agent !== "waiting_for_input") {
+      if (needsAttention(now.agent) && !needsAttention(before.agent)) {
         events.push({ key, kind: "needs_input" });
-      } else if (now.unread && !before.unread) {
-        events.push({ key, kind: "finished" });
+      } else if (isFailure(now.agent) && !isFailure(before.agent)) {
+        events.push({ key, kind: "failed" });
+      } else if (
+        now.unread &&
+        !before.unread &&
+        !isFailure(now.agent) &&
+        now.agent !== "interrupted" &&
+        now.outcome !== "interrupted"
+      ) {
+        events.push({
+          key,
+          kind: now.outcome === "failed" || now.outcome === "rate_limited" ? "failed" : "finished",
+        });
       }
     }
     return events;
@@ -67,6 +91,7 @@ export class NotifyTracker {
 }
 
 const MESSAGES: Record<NotifyKind, string> = {
+  failed: "Needs attention: agent failed or reached a usage limit",
   needs_input: "needs your input",
   finished: "finished",
 };

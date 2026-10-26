@@ -20,6 +20,7 @@
 //! (and in particular not the Android cross-build) compiles ts-rs. A new wire
 //! type gets the same `cfg_attr` derive and a line in `ts_export.rs`.
 
+pub mod agent_status;
 pub mod api;
 pub mod approval;
 pub mod comment;

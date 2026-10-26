@@ -243,6 +243,195 @@ async fn tmux_available() -> bool {
 }
 
 #[tokio::test]
+async fn agent_status_hooks_survive_poll_gaps_and_reject_old_generations() {
+    use claude_commander_core::agent::AgentKind;
+    use claude_commander_core::agent_status::{HookEvent, report_hook};
+    use claude_commander_core::tmux::AgentStateDetector;
+    use claude_commander_protocol::agent_status::AgentTurnOutcome;
+    use claude_commander_protocol::session::{AgentState, SessionId};
+    use std::time::Duration;
+    if !tmux_available().await {
+        return;
+    }
+    let temp = TempDir::new().unwrap();
+    let tmux = TmuxExecutor::new().with_tmux_tmpdir(Some(isolated_tmux_tmpdir(&temp)));
+    tmux.create_session("status-hooks", temp.path(), Some("sleep 120"))
+        .await
+        .unwrap();
+    let pane = tmux
+        .execute(&["display-message", "-p", "-t", "status-hooks", "#{pane_id}"])
+        .await
+        .unwrap();
+    let pane = pane.trim();
+    // Wait for the pane's own launch wrapper rather than racing its setup.
+    let mut generation = String::new();
+    for _ in 0..100 {
+        generation = tmux
+            .execute(&[
+                "show-options",
+                "-p",
+                "-v",
+                "-t",
+                pane,
+                "@cc_agent_generation",
+            ])
+            .await
+            .unwrap_or_default();
+        if !generation.trim().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let generation = generation.trim();
+    assert!(uuid::Uuid::parse_str(generation).is_ok());
+    report_hook(&tmux, pane, generation, HookEvent::Working)
+        .await
+        .unwrap();
+    let sid = SessionId::new();
+    let targets = vec![(sid, "status-hooks".to_string(), "claude".to_string())];
+    let mut detector = AgentStateDetector::new(tmux.clone(), Duration::ZERO);
+    assert_eq!(
+        detector.detect_all(&targets).await[&sid],
+        AgentState::Working
+    );
+    // The whole turn fits between two polls.
+    report_hook(&tmux, pane, generation, HookEvent::Completed)
+        .await
+        .unwrap();
+    report_hook(&tmux, pane, generation, HookEvent::Working)
+        .await
+        .unwrap();
+    assert_eq!(
+        detector.detect_all(&targets).await[&sid],
+        AgentState::Working
+    );
+    let observation = &detector.observations()[&sid];
+    assert_eq!(observation.completed_turns, 1);
+    assert_eq!(observation.last_outcome, Some(AgentTurnOutcome::Completed));
+    report_hook(
+        &tmux,
+        pane,
+        &uuid::Uuid::new_v4().to_string(),
+        HookEvent::Failed,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        detector.detect(AgentKind::Claude, "status-hooks").await,
+        AgentState::Working
+    );
+    report_hook(&tmux, pane, generation, HookEvent::Approval)
+        .await
+        .unwrap();
+    assert_eq!(
+        detector.detect_all(&targets).await[&sid],
+        AgentState::WaitingForApproval
+    );
+    report_hook(&tmux, pane, generation, HookEvent::RateLimited)
+        .await
+        .unwrap();
+    assert_eq!(
+        detector.detect_all(&targets).await[&sid],
+        AgentState::RateLimited
+    );
+    // Exercise real Codex correlation fields, including a delayed completion
+    // from a previous turn and a subagent using the parent's session id.
+    use claude_commander_core::agent_status::report_hook_payload;
+    use serde_json::json;
+    tmux.execute(&[
+        "set-option",
+        "-p",
+        "-u",
+        "-t",
+        pane,
+        "@cc_agent_root_session",
+    ])
+    .await
+    .unwrap();
+    let prompt = |turn: &str| json!({"hook_event_name":"UserPromptSubmit", "session_id":"root", "turn_id":turn});
+    let stop = |turn: &str| json!({"hook_event_name":"Stop", "session_id":"root", "turn_id":turn});
+    report_hook_payload(&tmux, pane, generation, &prompt("turn-a"))
+        .await
+        .unwrap();
+    report_hook_payload(&tmux, pane, generation, &stop("turn-a"))
+        .await
+        .unwrap();
+    detector.detect_all(&targets).await;
+    let finished = detector.observations()[&sid].completed_turns;
+    report_hook_payload(&tmux, pane, generation, &stop("turn-a"))
+        .await
+        .unwrap();
+    detector.detect_all(&targets).await;
+    assert_eq!(detector.observations()[&sid].completed_turns, finished);
+    report_hook_payload(&tmux, pane, generation, &prompt("turn-b"))
+        .await
+        .unwrap();
+    report_hook_payload(&tmux, pane, generation, &stop("turn-a"))
+        .await
+        .unwrap();
+    report_hook_payload(&tmux, pane, generation, &json!({"hook_event_name":"Stop", "session_id":"root", "turn_id":"turn-b", "agent_id":"child"})).await.unwrap();
+    report_hook_payload(
+        &tmux,
+        pane,
+        generation,
+        &json!({"hook_event_name":"SessionStart", "session_id":"root", "source":"startup"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        detector.detect_all(&targets).await[&sid],
+        AgentState::Working
+    );
+    assert_eq!(detector.observations()[&sid].completed_turns, finished);
+    let stopping = stop("turn-b");
+    let (a, b) = tokio::join!(
+        report_hook_payload(&tmux, pane, generation, &stopping),
+        report_hook_payload(&tmux, pane, generation, &stopping)
+    );
+    a.unwrap();
+    b.unwrap();
+    report_hook_payload(
+        &tmux,
+        pane,
+        generation,
+        &json!({"hook_event_name":"PostToolUse", "session_id":"root", "turn_id":"turn-b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(detector.detect_all(&targets).await[&sid], AgentState::Idle);
+    assert_eq!(detector.observations()[&sid].completed_turns, finished + 1);
+    // /clear replaces the logical root session without replacing the pane.
+    report_hook_payload(
+        &tmux,
+        pane,
+        generation,
+        &json!({"hook_event_name":"SessionStart", "session_id":"new-root", "source":"clear"}),
+    )
+    .await
+    .unwrap();
+    report_hook_payload(&tmux, pane, generation, &json!({"hook_event_name":"UserPromptSubmit", "session_id":"new-root", "turn_id":"turn-new"})).await.unwrap();
+    report_hook_payload(&tmux, pane, generation, &stop("turn-b"))
+        .await
+        .unwrap();
+    assert_eq!(
+        detector.detect_all(&targets).await[&sid],
+        AgentState::Working
+    );
+    assert_eq!(detector.observations()[&sid].last_outcome, None);
+    report_hook_payload(
+        &tmux,
+        pane,
+        generation,
+        &json!({"hook_event_name":"Stop", "session_id":"new-root", "turn_id":"turn-new"}),
+    )
+    .await
+    .unwrap();
+    detector.detect_all(&targets).await;
+    assert_eq!(detector.observations()[&sid].completed_turns, finished + 2);
+    tmux.kill_session("status-hooks").await.unwrap();
+}
+
+#[tokio::test]
 async fn test_git_backend_open() {
     let (_temp_dir, repo_path) = create_test_repo().await;
 

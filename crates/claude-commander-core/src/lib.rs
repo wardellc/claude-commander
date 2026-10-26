@@ -27,6 +27,7 @@
 //! - [`error`] - Error types
 
 pub mod agent;
+pub mod agent_status;
 pub mod api;
 pub mod backend;
 pub mod cli;

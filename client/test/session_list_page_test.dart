@@ -471,6 +471,7 @@ void main() {
     );
     api.listSessionsResponse = [waiting];
     api.agentStatesResponse = AgentStatesSnapshotDto(
+      observations: [],
       states: [
         AgentStateEntryDto(
           sessionId: waiting.sessionId,
@@ -500,6 +501,7 @@ void main() {
       ),
     ];
     api.agentStatesResponse = const AgentStatesSnapshotDto(
+      observations: [],
       states: [],
       commanderRunning: false,
     );

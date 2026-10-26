@@ -15,10 +15,12 @@ Future<CommanderStore> connectedStore(
   List<SessionInfo> sessions, {
   Map<String, AgentState> states = const {},
   ServerConfig config = testConfig,
+  List<AgentObservationDto> observations = const [],
 }) async {
   final api = FakeCommanderApi();
   api.listSessionsResponse = sessions;
   api.agentStatesResponse = AgentStatesSnapshotDto(
+    observations: observations,
     states: [
       for (final e in states.entries)
         AgentStateEntryDto(
@@ -39,6 +41,40 @@ String id(int n) =>
     '${n.toString().padLeft(8, '0')}-2222-3333-4444-555555555555';
 
 void main() {
+  test(
+    'unavailable status retains failure and interruption outcomes',
+    () async {
+      for (final outcome in [
+        AgentTurnOutcome.failed,
+        AgentTurnOutcome.rateLimited,
+        AgentTurnOutcome.interrupted,
+      ]) {
+        final store = await connectedStore(
+          [sessionInfo(id: id(1), unread: true)],
+          states: {id(1): AgentState.unknown},
+          observations: [
+            AgentObservationDto(
+              sessionId: SessionId(field0: UuidValue.fromString(id(1))),
+              source: AgentStatusSource.terminal,
+              observedAtMs: 1,
+              lastOutcome: outcome,
+              completedTurns: 1,
+              generation: 'launch',
+            ),
+          ],
+        );
+        final feed = buildActivityFeed([store]);
+        expect(
+          feed.where((e) => e.kind == ActivityKind.finishedUnread),
+          isEmpty,
+        );
+        if (outcome != AgentTurnOutcome.interrupted) {
+          expect(feed.any((e) => e.kind == ActivityKind.needsYou), isTrue);
+        }
+      }
+    },
+  );
+
   test(
     'where narrows the contributing sessions (the workspace scope)',
     () async {

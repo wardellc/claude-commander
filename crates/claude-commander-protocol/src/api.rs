@@ -430,6 +430,9 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgentStatesSnapshot {
+    /// Rich observations, absent when talking to an older server.
+    #[serde(default)]
+    pub observations: BTreeMap<SessionId, crate::agent_status::AgentStatus>,
     /// Per-session agent state, keyed by session id. NOTE: when a commander is
     /// running, this map also carries one synthetic entry under the commander
     /// *sentinel* id — a fixed reserved `SessionId` that does not correspond to
@@ -830,11 +833,13 @@ mod tests {
         let reverse: BTreeMap<SessionId, AgentState> =
             ids.iter().rev().map(|id| (*id, AgentState::Idle)).collect();
         let a = serde_json::to_vec(&AgentStatesSnapshot {
+            observations: Default::default(),
             states: forward,
             commander_running: true,
         })
         .unwrap();
         let b = serde_json::to_vec(&AgentStatesSnapshot {
+            observations: Default::default(),
             states: reverse,
             commander_running: true,
         })
@@ -1074,6 +1079,7 @@ mod tests {
         let mut states = BTreeMap::new();
         states.insert(sid, AgentState::Working);
         let snap = AgentStatesSnapshot {
+            observations: Default::default(),
             states,
             commander_running: true,
         };

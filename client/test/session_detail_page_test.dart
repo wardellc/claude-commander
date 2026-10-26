@@ -83,6 +83,7 @@ void main() {
   /// the store's live agent state (not the detail fixture) drives the header.
   AgentStatesSnapshotDto agentStates(SessionInfo info, AgentState state) =>
       AgentStatesSnapshotDto(
+        observations: [],
         states: [AgentStateEntryDto(sessionId: info.sessionId, state: state)],
         commanderRunning: true,
       );

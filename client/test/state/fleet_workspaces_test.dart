@@ -179,6 +179,7 @@ void main() {
   test('counts sessions waiting for input per workspace', () async {
     final fleet = await twoServers();
     fakes[a.id]!.agentStatesResponse = AgentStatesSnapshotDto(
+      observations: [],
       states: [
         AgentStateEntryDto(
           sessionId: sessionInfo(
@@ -190,6 +191,7 @@ void main() {
       commanderRunning: false,
     );
     fakes[b.id]!.agentStatesResponse = AgentStatesSnapshotDto(
+      observations: [],
       states: [
         AgentStateEntryDto(
           sessionId: sessionInfo(

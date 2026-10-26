@@ -537,7 +537,7 @@ fn attention_tier(item: &SessionListItem) -> u8 {
     };
     if *unread
         || *status == SessionStatus::CascadePaused
-        || matches!(agent_state, Some(AgentState::WaitingForInput))
+        || agent_state.is_some_and(|s| s.needs_attention())
     {
         0
     } else if *status == SessionStatus::Stopped {

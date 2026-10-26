@@ -1,139 +1,234 @@
-//! Agent state detection via tmux pane inspection.
-//!
-//! Detects whether an agent session is Working, Idle, or WaitingForInput by
-//! inspecting the tmux pane title and visible pane content. The per-harness
-//! pattern rules live on [`AgentKind`]; this module owns the tmux capture and
-//! result caching mechanics and dispatches to the right harness.
-
-use std::collections::{BTreeMap, HashMap};
-use std::time::{Duration, Instant};
-
-use futures::StreamExt;
-use tracing::debug;
-
+//! Shared agent observations from tmux panes and optional lifecycle hooks.
 use super::TmuxExecutor;
 use crate::agent::AgentKind;
-use crate::error::Result;
 use crate::session::{AgentState, SessionId};
+use claude_commander_protocol::agent_status::{AgentStatus, AgentStatusSource, AgentTurnOutcome};
+use futures::StreamExt;
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
+use tracing::debug;
 
-/// Agent state detector that polls tmux sessions and caches results.
+const PANE_FORMAT: &str = "#{session_name}\t#{window_active}\t#{pane_active}\t#{pane_dead}\t#{pane_dead_status}\t#{@cc_agent_generation}\t#{@cc_agent_status}\t#{pane_title}";
+
+#[derive(Clone, Debug)]
+struct PaneInfo {
+    title: String,
+    generation: String,
+    hook: Option<AgentStatus>,
+    dead: bool,
+    exit_code: Option<i32>,
+}
+
+fn pane_infos(output: &str) -> HashMap<String, PaneInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.splitn(8, '\t');
+            let name = f.next()?;
+            if f.next()? != "1" || f.next()? != "1" {
+                return None;
+            }
+            let dead = f.next()? == "1";
+            let exit_code = f.next()?.parse().ok();
+            let generation = f.next()?.to_string();
+            let raw = f.next()?;
+            let hook = (raw.len() <= 4096)
+                .then(|| serde_json::from_str::<AgentStatus>(raw).ok())
+                .flatten()
+                .filter(|s| {
+                    !generation.is_empty()
+                        && s.generation == generation
+                        && s.source == AgentStatusSource::Hook
+                        && s.observed_at_ms <= chrono::Utc::now().timestamp_millis() + 5000
+                });
+            Some((
+                name.to_string(),
+                PaneInfo {
+                    title: f.next()?.to_string(),
+                    generation,
+                    hook,
+                    dead,
+                    exit_code,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn resolve_observation(
+    kind: AgentKind,
+    pane: &PaneInfo,
+    content: &str,
+    previous: Option<&AgentStatus>,
+    now: i64,
+) -> AgentStatus {
+    let content_state = kind.content_state(content);
+    let terminal = if content_state.needs_attention() || content_state.is_busy() {
+        content_state
+    } else {
+        kind.title_state(&pane.title).unwrap_or(content_state)
+    };
+    let mut status = pane
+        .hook
+        .clone()
+        .unwrap_or_else(|| AgentStatus::terminal(terminal, now));
+    if pane.hook.is_none() {
+        status.generation.clone_from(&pane.generation);
+        if let Some(p) = previous.filter(|p| p.generation == pane.generation) {
+            status.last_outcome = p.last_outcome;
+            status.completed_turns = p.completed_turns;
+            if terminal == AgentState::Idle && p.state.is_busy() {
+                status.last_outcome = Some(AgentTurnOutcome::Completed);
+                status.completed_turns = status.completed_turns.saturating_add(1);
+            }
+        }
+    } else if !status.state.needs_attention()
+        && (terminal.needs_attention()
+            || (status.state.is_settled() && terminal.is_busy())
+            || (status.state == AgentState::Starting && terminal == AgentState::Idle))
+    {
+        status.state = terminal;
+        status.source = AgentStatusSource::Terminal;
+        status.observed_at_ms = now;
+    } else if status.state.needs_attention()
+        && !terminal.needs_attention()
+        && terminal != AgentState::Unknown
+        && now.saturating_sub(status.observed_at_ms) > 5_000
+    {
+        status.state = if terminal == AgentState::Idle {
+            AgentState::Unknown
+        } else {
+            terminal
+        };
+        status.source = AgentStatusSource::Terminal;
+        status.observed_at_ms = now;
+    } else if status.state.is_busy()
+        && terminal == AgentState::Idle
+        && now.saturating_sub(status.observed_at_ms) > 15_000
+    {
+        // Missing Stop is not success. A stale active hook with a positive
+        // idle-looking screen becomes Unknown, preserving hibernation safety.
+        status.state = AgentState::Unknown;
+        status.source = AgentStatusSource::Terminal;
+        status.observed_at_ms = now;
+    } else if status.state == AgentState::Starting
+        && now.saturating_sub(status.observed_at_ms) > 30_000
+    {
+        status.state = AgentState::Unknown;
+        status.source = AgentStatusSource::Terminal;
+        status.observed_at_ms = now;
+    }
+    if pane.dead {
+        status.state = if pane.exit_code.is_some_and(|c| c != 0) {
+            AgentState::Failed
+        } else {
+            AgentState::Unknown
+        };
+        status.source = AgentStatusSource::Terminal;
+        status.observed_at_ms = now;
+        if status.state == AgentState::Failed {
+            status.last_outcome = Some(AgentTurnOutcome::Failed);
+        }
+    }
+    status
+}
+
+fn unavailable(previous: Option<&AgentStatus>, now: i64) -> AgentStatus {
+    let mut status = previous
+        .cloned()
+        .unwrap_or_else(|| AgentStatus::terminal(AgentState::Unknown, now));
+    status.state = AgentState::Unknown;
+    status.source = AgentStatusSource::Terminal;
+    status.observed_at_ms = now;
+    status
+}
+
 pub struct AgentStateDetector {
     executor: TmuxExecutor,
     cache: HashMap<String, (AgentState, Instant)>,
     cache_ttl: Duration,
+    observations: BTreeMap<SessionId, AgentStatus>,
 }
-
 impl AgentStateDetector {
-    /// Create a new detector with the given cache TTL.
     pub fn new(executor: TmuxExecutor, cache_ttl: Duration) -> Self {
         Self {
             executor,
             cache: HashMap::new(),
             cache_ttl,
+            observations: BTreeMap::new(),
         }
     }
+    pub fn observations(&self) -> BTreeMap<SessionId, AgentStatus> {
+        self.observations.clone()
+    }
 
-    /// Detect agent state for a single tmux session, using cache if fresh.
-    ///
-    /// `kind` selects the harness-specific pattern rules.
-    pub async fn detect(&mut self, kind: AgentKind, tmux_session_name: &str) -> AgentState {
-        // Unrecognised harnesses have no reliable idle signal: `content_state`
-        // falls back to `Idle` for them, which would let the hibernation loop
-        // mistake an active non-agent session (a build, a shell, a custom
-        // wrapper) for idle and kill it. Report `Unknown` — callers treat it as
-        // active — without consulting tmux or the cache.
+    pub fn seed_observations(&mut self, observations: BTreeMap<SessionId, AgentStatus>) {
+        self.observations = observations;
+    }
+
+    pub async fn detect(&mut self, kind: AgentKind, name: &str) -> AgentState {
         if kind == AgentKind::Unknown {
             return AgentState::Unknown;
         }
-
-        // Check cache
-        if let Some((state, cached_at)) = self.cache.get(tmux_session_name)
-            && cached_at.elapsed() < self.cache_ttl
+        if let Some((state, at)) = self.cache.get(name)
+            && at.elapsed() < self.cache_ttl
         {
             return *state;
         }
-
-        let state = self.detect_fresh(kind, tmux_session_name).await;
-
-        self.cache
-            .insert(tmux_session_name.to_string(), (state, Instant::now()));
-
+        let panes = self
+            .executor
+            .execute(&["list-panes", "-t", name, "-F", PANE_FORMAT])
+            .await;
+        let pane = panes.ok().and_then(|s| pane_infos(&s).remove(name));
+        let state = if let Some(pane) = pane {
+            match self.capture_visible_pane(name).await {
+                Ok(content) => {
+                    resolve_observation(
+                        kind,
+                        &pane,
+                        &content,
+                        None,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .state
+                }
+                Err(_) => AgentState::Unknown,
+            }
+        } else {
+            AgentState::Unknown
+        };
+        self.cache.insert(name.to_string(), (state, Instant::now()));
         state
     }
-
-    /// Perform fresh detection bypassing cache.
-    async fn detect_fresh(&self, kind: AgentKind, tmux_session_name: &str) -> AgentState {
-        // Primary: check pane title (conclusive titles skip the content capture).
-        match self.get_pane_title(tmux_session_name).await {
-            Ok(title) => {
-                if let Some(state) = kind.title_state(&title) {
-                    debug!(
-                        "Pane title detection for {}: {:?}",
-                        tmux_session_name, state
-                    );
-                    return state;
-                }
-                // Title inconclusive — fall through to content.
-            }
-            Err(e) => {
-                debug!("Failed to get pane title for {}: {}", tmux_session_name, e);
-                return AgentState::Unknown;
-            }
-        }
-
-        // Secondary: parse visible pane content.
-        match self.capture_visible_pane(tmux_session_name).await {
-            Ok(content) => {
-                let state = kind.content_state(&content);
-                debug!(
-                    "Pane content detection for {}: {:?}",
-                    tmux_session_name, state
-                );
-                state
-            }
-            Err(e) => {
-                debug!("Failed to capture pane for {}: {}", tmux_session_name, e);
-                AgentState::Unknown
-            }
-        }
-    }
-
-    /// Get the tmux pane title.
-    async fn get_pane_title(&self, tmux_session_name: &str) -> Result<String> {
+    async fn capture_visible_pane(&self, name: &str) -> crate::Result<String> {
         self.executor
-            .execute(&[
-                "display-message",
-                "-t",
-                tmux_session_name,
-                "-p",
-                "#{pane_title}",
-            ])
+            .execute(&["capture-pane", "-t", name, "-p"])
             .await
     }
-
-    /// Capture visible pane content (no scrollback, no ANSI escapes).
-    async fn capture_visible_pane(&self, tmux_session_name: &str) -> Result<String> {
-        self.executor
-            .execute(&["capture-pane", "-t", tmux_session_name, "-p"])
-            .await
-    }
-
-    /// Detect agent states for a batch of sessions.
-    ///
-    /// Sessions whose program is an unrecognised harness get `Unknown` without
-    /// any tmux inspection.
     pub async fn detect_all(
         &mut self,
         sessions: &[(SessionId, String, String)],
     ) -> BTreeMap<SessionId, AgentState> {
+        self.observations
+            .retain(|id, _| sessions.iter().any(|(sid, _, _)| sid == id));
+        self.cache
+            .retain(|name, _| sessions.iter().any(|(_, n, _)| n == name));
         let mut results = BTreeMap::new();
         let mut pending = Vec::new();
         for (id, name, program) in sessions {
             let kind = AgentKind::from_program(program);
             if kind == AgentKind::Unknown {
                 results.insert(*id, AgentState::Unknown);
+                self.observations.insert(
+                    *id,
+                    AgentStatus::terminal(
+                        AgentState::Unknown,
+                        chrono::Utc::now().timestamp_millis(),
+                    ),
+                );
             } else if let Some((state, at)) = self.cache.get(name)
                 && at.elapsed() < self.cache_ttl
+                && self.observations.contains_key(id)
             {
                 results.insert(*id, *state);
             } else {
@@ -143,74 +238,171 @@ impl AgentStateDetector {
         if pending.is_empty() {
             return results;
         }
-        // Active flags are assumed to match the usual per-session target.
-        // Missing/malformed entries use the original per-session inspection.
-        // batch_titles_select_only_the_active_window_and_pane pins filtering.
-        let titles = self
+        let panes = self
             .executor
-            .execute(&[
-                "list-panes",
-                "-a",
-                "-F",
-                "#{session_name}\t#{window_active}\t#{pane_active}\t#{pane_title}",
-            ])
+            .execute(&["list-panes", "-a", "-F", PANE_FORMAT])
             .await
-            .map(|s| active_titles(&s))
+            .map(|s| pane_infos(&s))
             .unwrap_or_default();
         let detector = &*self;
-        let titles = &titles;
+        let panes = &panes;
         let detected: Vec<_> =
             futures::stream::iter(pending.into_iter().map(|(id, name, kind)| async move {
-                let state = if let Some(title) = titles.get(&name) {
-                    if let Some(state) = kind.title_state(title) {
-                        state
-                    } else {
-                        detector
-                            .capture_visible_pane(&name)
-                            .await
-                            .map(|content| kind.content_state(&content))
-                            .unwrap_or(AgentState::Unknown)
+                let now = chrono::Utc::now().timestamp_millis();
+                let status = if let Some(pane) = panes.get(&name) {
+                    match detector.capture_visible_pane(&name).await {
+                        Ok(content) => resolve_observation(
+                            kind,
+                            pane,
+                            &content,
+                            detector.observations.get(&id),
+                            now,
+                        ),
+                        Err(e) => {
+                            debug!("Failed to inspect agent pane {name}: {e}");
+                            unavailable(
+                                pane.hook
+                                    .as_ref()
+                                    .or_else(|| detector.observations.get(&id)),
+                                now,
+                            )
+                        }
                     }
                 } else {
-                    detector.detect_fresh(kind, &name).await
+                    unavailable(detector.observations.get(&id), now)
                 };
-                (id, name, state)
+                (id, name, status)
             }))
             .buffer_unordered(8)
             .collect()
             .await;
-        for (id, name, state) in detected {
-            self.cache.insert(name, (state, Instant::now()));
-            results.insert(id, state);
+        for (id, name, status) in detected {
+            self.cache.insert(name, (status.state, Instant::now()));
+            results.insert(id, status.state);
+            self.observations.insert(id, status);
         }
         results
     }
 }
 
-fn active_titles(output: &str) -> HashMap<String, String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.splitn(4, '\t');
-            let name = fields.next()?;
-            let window = fields.next()?;
-            let pane = fields.next()?;
-            let title = fields.next()?;
-            (window == "1" && pane == "1").then(|| (name.to_string(), title.to_string()))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pane(hook: Option<AgentStatus>) -> PaneInfo {
+        PaneInfo {
+            title: "◐ busy".into(),
+            generation: "launch".into(),
+            hook,
+            dead: false,
+            exit_code: None,
+        }
+    }
+
+    #[test]
+    fn approval_beats_a_stale_working_title() {
+        let status = resolve_observation(AgentKind::Claude, &pane(None), "Esc to cancel", None, 1);
+        assert_eq!(status.state, AgentState::WaitingForApproval);
+    }
+
+    #[test]
+    fn crash_is_not_success_even_with_a_stale_prompt() {
+        let mut p = pane(None);
+        p.dead = true;
+        p.exit_code = Some(1);
+        let status = resolve_observation(AgentKind::Claude, &p, "❯", None, 1);
+        assert_eq!(status.state, AgentState::Failed);
+        assert_eq!(status.last_outcome, Some(AgentTurnOutcome::Failed));
+    }
+
+    #[test]
+    fn hook_failure_survives_idle_but_new_work_keeps_last_outcome() {
+        let mut h = crate::agent_status::apply_hook(
+            None,
+            "launch",
+            crate::agent_status::HookEvent::Failed,
+            1,
+        );
+        let mut p = pane(Some(h.clone()));
+        p.title.clear();
+        let status = resolve_observation(AgentKind::Claude, &p, "❯", None, 2);
+        assert_eq!(status.state, AgentState::Failed);
+        p.title = "◐ busy".into();
+        h = resolve_observation(AgentKind::Claude, &p, "❯", None, 3);
+        assert_eq!(h.state, AgentState::Working);
+        assert_eq!(h.last_outcome, Some(AgentTurnOutcome::Failed));
+    }
+
+    #[test]
+    fn pane_metadata_rejects_old_launches_and_malformed_hook_records() {
+        let h = crate::agent_status::apply_hook(
+            None,
+            "old",
+            crate::agent_status::HookEvent::Completed,
+            1,
+        );
+        let raw = serde_json::to_string(&h).unwrap();
+        let p = pane_infos(&format!("s\t1\t1\t0\t\tnew\t{raw}\t✳ idle"));
+        assert!(p["s"].hook.is_none());
+        assert!(
+            pane_infos("s\t1\t1\t0\t\tnew\tbroken\ttitle")["s"]
+                .hook
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unknown_never_creates_a_completion() {
+        let mut p = pane(None);
+        p.title.clear();
+        let mut previous = AgentStatus::terminal(AgentState::Working, 1);
+        previous.generation = "launch".into();
+        let status = resolve_observation(AgentKind::Claude, &p, "", Some(&previous), 2);
+        assert_eq!(status.state, AgentState::Unknown);
+        assert_eq!(status.completed_turns, 0);
+        assert_eq!(status.last_outcome, None);
+    }
+
+    #[test]
+    fn cancelled_approval_recovers_from_positive_terminal_evidence() {
+        let h = crate::agent_status::apply_hook(
+            None,
+            "launch",
+            crate::agent_status::HookEvent::Approval,
+            1,
+        );
+        let p = pane(Some(h));
+        let resumed = resolve_observation(AgentKind::Claude, &p, "❯", None, 6_000);
+        assert_eq!(resumed.state, AgentState::Working);
+        let mut p = p;
+        p.title.clear();
+        assert_eq!(
+            resolve_observation(AgentKind::Claude, &p, "❯", Some(&resumed), 7_000).state,
+            AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn dropped_completion_hook_is_unknown_rather_than_success() {
+        let h = crate::agent_status::apply_hook(
+            None,
+            "launch",
+            crate::agent_status::HookEvent::Working,
+            1,
+        );
+        let mut p = pane(Some(h));
+        p.title.clear();
+        let status = resolve_observation(AgentKind::Claude, &p, "❯", None, 16_000);
+        assert_eq!(status.state, AgentState::Unknown);
+        assert_eq!(status.last_outcome, None);
+    }
     #[test]
     fn batch_titles_select_only_the_active_window_and_pane() {
-        let titles = active_titles(
-            "s\t0\t1\tinactive window\ns\t1\t0\tinactive pane\ns\t1\t1\tworking\twith tab\nmalformed\n",
+        let titles = pane_infos(
+            "s\t0\t1\t0\t\t\t\tinactive window\ns\t1\t0\t0\t\t\t\tinactive pane\ns\t1\t1\t0\t\t\t\tworking\twith tab\nmalformed\n",
         );
         assert_eq!(titles.len(), 1);
-        assert_eq!(titles["s"], "working\twith tab");
+        assert_eq!(titles["s"].title, "working\twith tab");
     }
 
     // -- cache TTL boundary tests --

@@ -1,3 +1,5 @@
+import '../util/agent_status.dart';
+
 import 'package:flutter/material.dart';
 
 import '../chrome/chrome.dart';
@@ -446,8 +448,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
 
   Widget _liveBody(BuildContext context, SessionInfo info) {
     final waiting =
-        info.status == SessionStatus.running &&
-        _agentState == AgentState.waitingForInput;
+        info.status == SessionStatus.running && _agentState.needsAttention;
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
@@ -497,6 +498,12 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
                   statusChip(context, info.status),
                   if (info.status == SessionStatus.running)
                     agentStateChip(context, _agentState),
+                  if (_store?.agentObservationFor(_id)?.lastOutcome
+                      case final outcome?)
+                    AppChip(
+                      label: 'last turn: ${outcomeLabel(outcome)}',
+                      color: t.textMuted,
+                    ),
                   if (info.prNumber != null)
                     prChip(context, info.prNumber!, info.prState),
                   if (section != null) sectionChip(context, section),

@@ -232,6 +232,7 @@ impl BackendView {
         Self {
             snapshot: empty_snapshot(),
             agent_states: AgentStatesSnapshot {
+                observations: Default::default(),
                 states: Default::default(),
                 commander_running: false,
             },

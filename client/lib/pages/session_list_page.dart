@@ -1,3 +1,5 @@
+import '../util/agent_status.dart';
+
 import 'package:flutter/material.dart';
 
 import '../chrome/chrome_forms.dart';
@@ -42,11 +44,11 @@ enum _Quick { needsInput, working, review }
 /// waiting for input, or a cascade paused mid-stack.
 bool _isNeedsInput(CommanderStore store, SessionInfo s) =>
     s.status == SessionStatus.cascadePaused ||
-    store.agentStateFor(s.id) == AgentState.waitingForInput;
+    store.agentStateFor(s.id).needsAttention;
 
 /// True when [s]'s agent is actively working.
 bool _isWorking(CommanderStore store, SessionInfo s) =>
-    store.agentStateFor(s.id) == AgentState.working;
+    store.agentStateFor(s.id).isBusy;
 
 /// True when [s] carries an open PR — a candidate for review.
 bool _isReview(SessionInfo s) =>

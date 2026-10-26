@@ -74,6 +74,7 @@ void main() {
         ),
       ]
       ..agentStatesResponse = AgentStatesSnapshotDto(
+        observations: [],
         states: [
           AgentStateEntryDto(
             sessionId: sessionInfo(id: _workSession).sessionId,

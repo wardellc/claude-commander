@@ -3,6 +3,7 @@
 
 import type {
   AgentState,
+  AgentStatus,
   CreateOptions,
   ProjectInfo,
   SessionId,
@@ -14,6 +15,7 @@ export interface AppState {
   projects: ProjectInfo[];
   /** `AgentStatesSnapshot.states` from the last poll. */
   agentStates: Partial<Record<SessionId, AgentState>>;
+  agentObservations: Partial<Record<SessionId, AgentStatus>>;
   createOptions: CreateOptions | null;
   selectedId: string | null;
   collapsed: Set<string>;
@@ -24,6 +26,7 @@ export const state: AppState = {
   sessions: [],
   projects: [],
   agentStates: {},
+  agentObservations: {},
   createOptions: null,
   selectedId: null,
   collapsed: new Set(),

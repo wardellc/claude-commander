@@ -56,6 +56,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   UuidValue dco_decode_Uuid(dynamic raw);
 
   @protected
+  AgentObservationDto dco_decode_agent_observation_dto(dynamic raw);
+
+  @protected
   AgentState dco_decode_agent_state(dynamic raw);
 
   @protected
@@ -63,6 +66,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AgentStatesSnapshotDto dco_decode_agent_states_snapshot_dto(dynamic raw);
+
+  @protected
+  AgentStatusSource dco_decode_agent_status_source(dynamic raw);
+
+  @protected
+  AgentTurnOutcome dco_decode_agent_turn_outcome(dynamic raw);
 
   @protected
   ApplyResult dco_decode_apply_result(dynamic raw);
@@ -90,6 +99,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
+  AgentTurnOutcome dco_decode_box_autoadd_agent_turn_outcome(dynamic raw);
 
   @protected
   ApprovalSummary dco_decode_box_autoadd_approval_summary(dynamic raw);
@@ -241,6 +253,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<AgentObservationDto> dco_decode_list_agent_observation_dto(dynamic raw);
+
+  @protected
   List<AgentStateEntryDto> dco_decode_list_agent_state_entry_dto(dynamic raw);
 
   @protected
@@ -329,6 +344,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
+  AgentTurnOutcome? dco_decode_opt_box_autoadd_agent_turn_outcome(dynamic raw);
 
   @protected
   ApprovalSummary? dco_decode_opt_box_autoadd_approval_summary(dynamic raw);
@@ -518,6 +536,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   UuidValue sse_decode_Uuid(SseDeserializer deserializer);
 
   @protected
+  AgentObservationDto sse_decode_agent_observation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   AgentState sse_decode_agent_state(SseDeserializer deserializer);
 
   @protected
@@ -529,6 +552,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentStatesSnapshotDto sse_decode_agent_states_snapshot_dto(
     SseDeserializer deserializer,
   );
+
+  @protected
+  AgentStatusSource sse_decode_agent_status_source(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AgentTurnOutcome sse_decode_agent_turn_outcome(SseDeserializer deserializer);
 
   @protected
   ApplyResult sse_decode_apply_result(SseDeserializer deserializer);
@@ -556,6 +587,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
+  AgentTurnOutcome sse_decode_box_autoadd_agent_turn_outcome(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ApprovalSummary sse_decode_box_autoadd_approval_summary(
@@ -735,6 +771,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
+  List<AgentObservationDto> sse_decode_list_agent_observation_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<AgentStateEntryDto> sse_decode_list_agent_state_entry_dto(
     SseDeserializer deserializer,
   );
@@ -855,6 +896,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
+  AgentTurnOutcome? sse_decode_opt_box_autoadd_agent_turn_outcome(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ApprovalSummary? sse_decode_opt_box_autoadd_approval_summary(
@@ -1089,6 +1135,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_Uuid(UuidValue self, SseSerializer serializer);
 
   @protected
+  void sse_encode_agent_observation_dto(
+    AgentObservationDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_agent_state(AgentState self, SseSerializer serializer);
 
   @protected
@@ -1100,6 +1152,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_agent_states_snapshot_dto(
     AgentStatesSnapshotDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_agent_status_source(
+    AgentStatusSource self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_agent_turn_outcome(
+    AgentTurnOutcome self,
     SseSerializer serializer,
   );
 
@@ -1142,6 +1206,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_Chrono_Utc(
     DateTime self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_agent_turn_outcome(
+    AgentTurnOutcome self,
     SseSerializer serializer,
   );
 
@@ -1377,6 +1447,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_agent_observation_dto(
+    List<AgentObservationDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_agent_state_entry_dto(
     List<AgentStateEntryDto> self,
     SseSerializer serializer,
@@ -1544,6 +1620,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_Chrono_Utc(
     DateTime? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_agent_turn_outcome(
+    AgentTurnOutcome? self,
     SseSerializer serializer,
   );
 

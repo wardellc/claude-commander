@@ -57,6 +57,7 @@ class CommanderStore extends ChangeNotifier {
   SnapshotDto? get snapshot => _snapshot;
 
   final Map<String, AgentState> _agentStates = {};
+  final Map<String, AgentObservationDto> _agentObservations = {};
   bool _commanderRunning = false;
   bool get commanderRunning => _commanderRunning;
 
@@ -183,6 +184,7 @@ class CommanderStore extends ChangeNotifier {
   /// The agent state for a session id (the [SessionInfo.id] string form), or
   /// [AgentState.unknown] if the snapshot has no entry for it.
   AgentState agentStateFor(String id) => _agentStates[id] ?? AgentState.unknown;
+  AgentObservationDto? agentObservationFor(String id) => _agentObservations[id];
 
   /// The live [SessionInfo] for an id from the latest snapshot, or null if the
   /// session is no longer present (deleted/stopped-and-removed).
@@ -267,6 +269,7 @@ class CommanderStore extends ChangeNotifier {
     _config = next;
     _snapshot = null;
     _agentStates.clear();
+    _agentObservations.clear();
     _commanderRunning = false;
     _connection = const ConnectionStateDto(
       kind: ConnectionStateKind.connecting,
@@ -571,6 +574,11 @@ class CommanderStore extends ChangeNotifier {
         ..clear()
         ..addEntries(
           states.states.map((e) => MapEntry(e.sessionId.field0.uuid, e.state)),
+        );
+      _agentObservations
+        ..clear()
+        ..addEntries(
+          states.observations.map((o) => MapEntry(o.sessionId.field0.uuid, o)),
         );
       _commanderRunning = states.commanderRunning;
       _error = null;

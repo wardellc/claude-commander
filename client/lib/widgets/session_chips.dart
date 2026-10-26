@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../src/rust/api/mirrors.dart';
 import '../theme/tokens.dart';
+import '../util/agent_status.dart';
 
 /// Small status/PR/agent-state pills shared by the session list and detail
 /// views, so their colour coding stays consistent. All pills render through
@@ -27,12 +28,18 @@ Widget statusChip(BuildContext context, SessionStatus status) {
 /// caller decides whether to show it.
 Widget agentStateChip(BuildContext context, AgentState state) {
   final t = CommanderTokens.of(context);
-  final (label, color) = switch (state) {
-    AgentState.working => ('● working', t.working),
-    AgentState.idle => ('idle', t.idle),
-    AgentState.waitingForInput => ('? waiting for input', t.attention),
-    AgentState.unknown => ('unknown', t.idle),
-  };
+  final color = state.isFailure
+      ? t.danger
+      : state.needsAttention
+      ? t.attention
+      : state.isBusy
+      ? t.working
+      : t.idle;
+  final label = state == AgentState.working
+      ? '● working'
+      : state == AgentState.waitingForInput
+      ? '? waiting for input'
+      : state.statusLabel;
   return AppChip(label: label, color: color);
 }
 

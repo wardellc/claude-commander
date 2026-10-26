@@ -31,6 +31,7 @@ void main() {
   const id = '11111111-2222-3333-4444-555555555555';
 
   AgentStatesSnapshotDto statesWith(AgentState state) => AgentStatesSnapshotDto(
+    observations: [],
     states: [
       AgentStateEntryDto(
         sessionId: SessionId(field0: UuidValue.fromString(id)),

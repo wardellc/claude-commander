@@ -8,9 +8,62 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
-enum AgentState { working, idle, waitingForInput, unknown }
+/// Bulk agent-state snapshot, map flattened to a `Vec` with the synthetic
+/// commander sentinel entry stripped (its running-ness is `commander_running`).
+class AgentObservationDto {
+  final SessionId sessionId;
+  final AgentStatusSource source;
+  final PlatformInt64 observedAtMs;
+  final AgentTurnOutcome? lastOutcome;
+  final int completedTurns;
+  final String generation;
+
+  const AgentObservationDto({
+    required this.sessionId,
+    required this.source,
+    required this.observedAtMs,
+    this.lastOutcome,
+    required this.completedTurns,
+    required this.generation,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^
+      source.hashCode ^
+      observedAtMs.hashCode ^
+      lastOutcome.hashCode ^
+      completedTurns.hashCode ^
+      generation.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AgentObservationDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          source == other.source &&
+          observedAtMs == other.observedAtMs &&
+          lastOutcome == other.lastOutcome &&
+          completedTurns == other.completedTurns &&
+          generation == other.generation;
+}
+
+enum AgentState {
+  working,
+  idle,
+  waitingForInput,
+  unknown,
+  starting,
+  waitingForApproval,
+  compacting,
+  retrying,
+  failed,
+  rateLimited,
+  interrupted,
+}
 
 /// One session's agent state (flattened from the snapshot's
 /// `BTreeMap<SessionId, AgentState>`). The commander *sentinel* id is never
@@ -33,28 +86,34 @@ class AgentStateEntryDto {
           state == other.state;
 }
 
-/// Bulk agent-state snapshot, map flattened to a `Vec` with the synthetic
-/// commander sentinel entry stripped (its running-ness is `commander_running`).
 class AgentStatesSnapshotDto {
+  final List<AgentObservationDto> observations;
   final List<AgentStateEntryDto> states;
   final bool commanderRunning;
 
   const AgentStatesSnapshotDto({
+    required this.observations,
     required this.states,
     required this.commanderRunning,
   });
 
   @override
-  int get hashCode => states.hashCode ^ commanderRunning.hashCode;
+  int get hashCode =>
+      observations.hashCode ^ states.hashCode ^ commanderRunning.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is AgentStatesSnapshotDto &&
           runtimeType == other.runtimeType &&
+          observations == other.observations &&
           states == other.states &&
           commanderRunning == other.commanderRunning;
 }
+
+enum AgentStatusSource { terminal, hook }
+
+enum AgentTurnOutcome { completed, failed, rateLimited, interrupted }
 
 class ApprovalRule {
   final String id;

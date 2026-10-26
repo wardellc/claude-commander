@@ -60,11 +60,7 @@ pub(crate) fn is_session_active(
     attached: bool,
     recently_attached: bool,
 ) -> bool {
-    matches!(
-        state,
-        AgentState::Working | AgentState::WaitingForInput | AgentState::Unknown
-    ) || attached
-        || recently_attached
+    !state.is_settled() || attached || recently_attached
 }
 
 /// Whether a session should count as attached, given attachment probes for its

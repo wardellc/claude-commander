@@ -3,9 +3,11 @@
 // `TreeView` decides whether a poll needs a re-render (pure, tested);
 // `renderTree` builds the DOM from a `TreeModel`.
 
+import { observationLabel } from "./agent_status.ts";
 import { clear, h, type MenuItem, showContextMenu } from "./dom.ts";
 import type {
   AgentState,
+  AgentStatus,
   ProjectInfo,
   SessionId,
   SessionInfo,
@@ -18,6 +20,7 @@ export interface TreeModel {
   projects: readonly ProjectInfo[];
   sessions: readonly SessionInfo[];
   agentStates: Partial<Record<SessionId, AgentState>>;
+  agentObservations?: Partial<Record<SessionId, AgentStatus>>;
   selectedId: string | null;
   collapsed: ReadonlySet<string>;
 }
@@ -53,6 +56,7 @@ export function treeKey(model: TreeModel): string {
     model.projects,
     model.sessions,
     model.agentStates,
+    model.agentObservations,
     model.selectedId,
     [...model.collapsed].sort(),
   ]);
@@ -87,8 +91,16 @@ function statusBadge(status: SessionStatus): HTMLElement {
   return h("span", { className: `badge ${status}`, text: humanize(status) });
 }
 
-function agentBadge(st: AgentState): HTMLElement {
-  return h("span", { className: `agent ${st}` }, h("span", { className: "dot" }), humanize(st));
+function agentBadge(st: AgentState, observation?: AgentStatus): HTMLElement {
+  return h(
+    "span",
+    {
+      className: `agent ${st}`,
+      title: observation ? observationLabel(observation) : "Status inferred from terminal",
+    },
+    h("span", { className: "dot" }),
+    humanize(st),
+  );
 }
 
 function sessionRow(s: SessionInfo, model: TreeModel, on: TreeHandlers): HTMLElement {
@@ -105,7 +117,7 @@ function sessionRow(s: SessionInfo, model: TreeModel, on: TreeHandlers): HTMLEle
       className: "session-meta",
       text: `${s.branch}${s.pr_number ? ` · PR #${s.pr_number}` : ""}`,
     }),
-    agentBadge(agentStateFor(model.agentStates, s)),
+    agentBadge(agentStateFor(model.agentStates, s), model.agentObservations?.[s.id]),
   );
   li.dataset.id = s.id;
   li.addEventListener("click", () => on.onSelect(s.id));

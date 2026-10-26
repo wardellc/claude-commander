@@ -705,6 +705,7 @@ fn test_info_view_renders_stack_chain() {
         },
     ];
     let data = InfoSessionData {
+        agent_status: None,
         title: "child".into(),
         branch: "child-br".into(),
         created_at: "now".into(),
@@ -759,6 +760,7 @@ fn test_info_view_stack_section_renders_above_pr_section() {
         },
     ];
     let data = InfoSessionData {
+        agent_status: None,
         title: "child".into(),
         branch: "child-br".into(),
         created_at: "now".into(),
@@ -800,6 +802,7 @@ fn test_info_view_no_stack_section_for_unstacked() {
     let theme = crate::theme::Theme::basic();
     let diff = claude_commander_core::git::DiffInfo::empty();
     let data = InfoSessionData {
+        agent_status: None,
         title: "solo".into(),
         branch: "solo-br".into(),
         created_at: "now".into(),
@@ -4020,6 +4023,7 @@ fn buildbox_version_warning(app: &App) -> Option<claude_commander_core::backend:
 
 fn agent_states_box() -> Box<claude_commander_core::api::AgentStatesSnapshot> {
     Box::new(claude_commander_core::api::AgentStatesSnapshot {
+        observations: Default::default(),
         states: Default::default(),
         commander_running: false,
     })
@@ -4389,6 +4393,7 @@ async fn pull_blocked_badges_union_remote_backend_snapshot() {
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
+            observations: Default::default(),
             states: Default::default(),
             commander_running: false,
         }),
@@ -4416,6 +4421,7 @@ async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
     );
     let states = || {
         Box::new(claude_commander_core::api::AgentStatesSnapshot {
+            observations: Default::default(),
             states: Default::default(),
             commander_running: false,
         })
@@ -4481,6 +4487,7 @@ async fn remote_connection_stays_watch_owned_across_snapshot_fold() {
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
+            observations: Default::default(),
             states: Default::default(),
             commander_running: false,
         }),
@@ -6328,6 +6335,7 @@ async fn fold_backend_states(
         backend_id: id.0,
         snapshot: Box::new(snapshot),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
+            observations: Default::default(),
             states: new_states,
             commander_running: false,
         }),
@@ -6977,6 +6985,7 @@ async fn pending_comment_markers_union_every_backend_view() {
         backend_id: BackendId(1).0,
         snapshot: Box::new(remote_snap),
         states: Box::new(claude_commander_core::api::AgentStatesSnapshot {
+            observations: Default::default(),
             states: Default::default(),
             commander_running: false,
         }),
@@ -12959,6 +12968,7 @@ async fn attach_return_renders_before_slow_fresh_agent_detection() {
         .insert(sid, AgentState::Working);
     remote_mock(&app, BackendId(1)).set_agent_states(
         claude_commander_core::api::AgentStatesSnapshot {
+            observations: Default::default(),
             states: BTreeMap::from([(sid, AgentState::Idle)]),
             commander_running: false,
         },
@@ -13041,6 +13051,7 @@ async fn attach_refresh_marks_switcher_visits_and_preserves_other_backends() {
         .insert(other_sid, AgentState::Idle);
     remote_mock(&app, BackendId(1)).set_agent_states(
         claude_commander_core::api::AgentStatesSnapshot {
+            observations: Default::default(),
             states: BTreeMap::from([
                 (first, AgentState::Idle),
                 (second_id, AgentState::Idle),
