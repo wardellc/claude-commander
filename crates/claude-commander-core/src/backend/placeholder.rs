@@ -24,6 +24,7 @@ use crate::api::{
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
@@ -145,6 +146,9 @@ impl CommanderBackend for PlaceholderBackend {
     async fn restart_session_fresh(&self, _id: SessionId) -> BResult<()> {
         self.unavailable()
     }
+    async fn recover_session_fresh(&self, _id: SessionId) -> BResult<()> {
+        self.unavailable()
+    }
 
     async fn delete_session(&self, _id: SessionId) -> BResult<()> {
         self.unavailable()
@@ -154,7 +158,7 @@ impl CommanderBackend for PlaceholderBackend {
         &self,
         _id: SessionId,
         _edit: claude_commander_protocol::api::EditSession,
-    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome> {
         self.unavailable()
     }
 
@@ -305,7 +309,16 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
-    async fn toggle_file_reviewed(&self, _id: SessionId, _display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        _id: SessionId,
+        _display_path: String,
+        _reviewed: bool,
+    ) -> BResult<bool> {
+        self.unavailable()
+    }
+
+    async fn reviewed_marks(&self, _id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
         self.unavailable()
     }
 

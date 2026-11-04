@@ -4,6 +4,13 @@ use super::*;
 use crate::agent::AgentKind;
 use crate::git::git_command;
 
+pub(crate) struct DeletePlan {
+    provider: claude_commander_protocol::hosting::CodeHostProvider,
+    repo_path: Option<PathBuf>,
+    session: WorktreeSession,
+    retargets: Vec<crate::config::PrBaseRetarget>,
+}
+
 impl SessionManager {
     /// Prepare a placeholder session in `Creating` state.
     ///
@@ -412,6 +419,7 @@ impl SessionManager {
                 state.remove_session(&sid);
             })
             .await?;
+        self.diff_cache.invalidate(session_id).await;
         info!("Removed creating session {}", session_id);
         Ok(())
     }
@@ -529,11 +537,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Restart a session's tmux pane without `--resume`, identified by session
-    /// id. Resolves the tmux name and delegates to
-    /// [`Self::restart_session_fresh_by_tmux_name`]; the attach loop uses this
-    /// (it holds the [`SessionId`], not the tmux name) to give a fresh
-    /// conversation when the agent process exits.
+    /// Explicitly restart without resume, applying any pending program change.
     pub async fn restart_session_fresh(&self, session_id: &SessionId) -> Result<()> {
         let tmux_name = {
             let state = self.store.read().await;
@@ -543,14 +547,28 @@ impl SessionManager {
                 .tmux_session_name
                 .clone()
         };
+        self.recreate_session_fresh(&tmux_name, true).await
+    }
+
+    /// Recover an exited agent without resume, preserving pending settings.
+    pub async fn recover_session_fresh(&self, session_id: &SessionId) -> Result<()> {
+        let tmux_name = self
+            .store
+            .read()
+            .await
+            .get_session(session_id)
+            .ok_or(SessionError::NotFound(*session_id))?
+            .tmux_session_name
+            .clone();
         self.restart_session_fresh_by_tmux_name(&tmux_name).await
     }
 
-    /// Restart a session's tmux pane without `--resume`, identified by tmux
-    /// session name. Used when the process inside the pane exits (e.g. Claude
-    /// had nothing to resume) so the user seamlessly gets a fresh conversation
-    /// instead of being dropped back to the TUI.
+    /// Name-based automatic recovery; deferred programs await an explicit restart.
     pub async fn restart_session_fresh_by_tmux_name(&self, tmux_name: &str) -> Result<()> {
+        self.recreate_session_fresh(tmux_name, false).await
+    }
+
+    async fn recreate_session_fresh(&self, tmux_name: &str, apply_pending: bool) -> Result<()> {
         let (session_id, worktree_path, title, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
@@ -562,11 +580,15 @@ impl SessionManager {
                 session.id,
                 session.worktree_path.clone(),
                 session.title.clone(),
-                session
-                    .pending_program
-                    .as_ref()
-                    .unwrap_or(&session.program)
-                    .clone(),
+                if apply_pending {
+                    session
+                        .pending_program
+                        .as_ref()
+                        .unwrap_or(&session.program)
+                        .clone()
+                } else {
+                    session.program.clone()
+                },
                 self.status_bar_info(session, &state),
             )
         };
@@ -616,9 +638,11 @@ impl SessionManager {
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
-                    session.program = program.clone();
-                    if session.pending_program.as_deref() == Some(program.as_str()) {
-                        session.pending_program = None;
+                    if apply_pending {
+                        session.program = program.clone();
+                        if session.pending_program.as_deref() == Some(program.as_str()) {
+                            session.pending_program = None;
+                        }
                     }
                     session.set_status(SessionStatus::Running);
                     // The pane is live again, so clear the hibernation marker to
@@ -855,6 +879,15 @@ impl SessionManager {
     /// Delete a session (remove from state)
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
+        let plan = self.prepare_delete_session(session_id).await?;
+        self.finish_delete_session(plan).await;
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_delete_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<DeletePlan> {
         let provider = self.config_store.read().code_host_provider;
         // Resolve the owning project's repo path up front (needed to open the
         // git backend for worktree removal) — a cheap store read while the
@@ -888,6 +921,21 @@ impl SessionManager {
             return Err(SessionError::NotFound(*session_id).into());
         };
 
+        Ok(DeletePlan {
+            provider,
+            repo_path,
+            session,
+            retargets: pr_retargets,
+        })
+    }
+
+    pub(crate) async fn finish_delete_session(&self, plan: DeletePlan) {
+        let DeletePlan {
+            provider,
+            repo_path,
+            session,
+            retargets: pr_retargets,
+        } = plan;
         // Tear down the (already-removed) session's resources. Unconditional: a
         // Stopped session has no live tmux session but its worktree is still on
         // disk and must be cleaned up. A failure here can't restore the row and
@@ -907,13 +955,17 @@ impl SessionManager {
         {
             warn!("Failed to remove worktree while deleting session: {}", e);
         }
+        // Release the worktree's filesystem watch along with its cached diff
+        // only now: a get_diff racing the teardown could otherwise re-register
+        // a watch on the still-present worktree. Unconditional even when the
+        // removal failed — the session is gone, so nothing would release it.
+        self.diff_cache.invalidate(&session.id).await;
 
         // Durably retarget child reviews on the selected host (best-effort,
         // non-fatal).
         Self::retarget_child_prs(provider, pr_retargets).await;
 
-        info!("Deleted session {}", session_id);
-        Ok(())
+        info!("Deleted session {}", session.id);
     }
 
     /// Run planned review-base edits for a stack deletion. Best-effort: each

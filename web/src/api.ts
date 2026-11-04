@@ -1,3 +1,4 @@
+import { CHANGE_WAIT_SECS } from "./generated/constants.ts";
 // The commander HTTP API, typed over the shapes generated from
 // claude-commander-protocol (src/generated). This is the one place that knows
 // about the bearer header and what a 401 means; nothing else calls fetch.
@@ -16,13 +17,17 @@ import type {
   CreateOptions,
   CreateSessionOpts,
   EditSession,
+  EditSessionOutcome,
   NewComment,
+  PlanSessionEdit,
   ProjectId,
   ReviewedToggle,
   ReviewSnapshot,
   ScanResponse,
+  SessionEditorInput,
+  SessionEditorModel,
+  SessionEditorPlan,
   SessionId,
-  SetSessionBaseOutcome,
   Snapshot,
   ToggleReviewed,
 } from "./generated/index.ts";
@@ -193,7 +198,7 @@ export class Api {
       timeout === "read"
         ? this.readTimeoutMs
         : timeout === "changes"
-          ? 30_000
+          ? (CHANGE_WAIT_SECS + 10) * 1000
           : this.writeTimeoutMs;
     // A write that timed out may well still be running server-side (a create
     // fetching the remote): say so, or the natural retry makes a duplicate.
@@ -240,8 +245,12 @@ export class Api {
 
   createSession = (opts: CreateSessionOpts) =>
     this.request<CreatedId<SessionId>>("POST", "/sessions", opts);
+  sessionEditorModel = (input: SessionEditorInput) =>
+    this.request<SessionEditorModel>("POST", "/session-editor/model", input);
+  planSessionEdit = (input: PlanSessionEdit) =>
+    this.request<SessionEditorPlan>("POST", "/session-editor/plan", input);
   editSession = (id: SessionId, edit: EditSession) =>
-    this.request<SetSessionBaseOutcome | null>("PATCH", `/sessions/${id}`, { op: "edit", ...edit });
+    this.request<EditSessionOutcome>("PATCH", `/sessions/${id}`, { op: "edit", ...edit });
   restartSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/restart`);
   killSession = (id: SessionId) => this.request<unknown>("POST", `/sessions/${id}/kill`);
   deleteSession = (id: SessionId) => this.request<unknown>("DELETE", `/sessions/${id}`);

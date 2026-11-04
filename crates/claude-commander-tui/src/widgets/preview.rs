@@ -21,8 +21,6 @@ pub struct Preview<'a> {
     block: Option<Block<'a>>,
     /// Scroll offset
     scroll: u16,
-    /// Opacity for unfocused dimming (None = no dimming, Some(0.4) = 40% brightness)
-    dim_opacity: Option<f32>,
     parsed: Option<&'a Paragraph<'static>>,
 }
 
@@ -33,7 +31,6 @@ impl<'a> Preview<'a> {
             content,
             block: None,
             scroll: 0,
-            dim_opacity: None,
             parsed: None,
         }
     }
@@ -50,14 +47,10 @@ impl<'a> Preview<'a> {
         self
     }
 
-    /// Set the opacity for unfocused dimming (0.0 = black, 1.0 = unchanged)
+    /// Render a pre-parsed (already dimmed and scrolled) paragraph from
+    /// [`PreviewState::paragraph`] instead of re-parsing `content`.
     pub fn with_paragraph(mut self, text: &'a Paragraph<'static>) -> Self {
         self.parsed = Some(text);
-        self
-    }
-
-    pub fn dim_opacity(mut self, opacity: Option<f32>) -> Self {
-        self.dim_opacity = opacity;
         self
     }
 }
@@ -73,21 +66,10 @@ impl<'a> Widget for Preview<'a> {
             return;
         }
         // Convert ANSI escape codes when no cached paragraph was supplied.
-        let mut text = self
+        let text = self
             .content
             .into_text()
             .unwrap_or_else(|_| Text::raw(self.content));
-        if let Some(opacity) = self.dim_opacity {
-            for line in &mut text.lines {
-                for span in &mut line.spans {
-                    let fg = span.style.fg.unwrap_or(ratatui::style::Color::Reset);
-                    span.style = span
-                        .style
-                        .fg(dim_color(fg, opacity))
-                        .remove_modifier(Modifier::REVERSED);
-                }
-            }
-        }
 
         // No .wrap() - preserve original formatting (ASCII boxes, tables, etc.)
         let paragraph = Paragraph::new(text).scroll((self.scroll, 0));
@@ -99,6 +81,20 @@ impl<'a> Widget for Preview<'a> {
         };
 
         paragraph.render(area, buf);
+    }
+}
+
+/// Dim every span of `text` towards black by `opacity` (0.0 = black,
+/// 1.0 = unchanged) and drop reverse video, for an unfocused pane.
+fn dim_text(text: &mut Text, opacity: f32) {
+    for line in &mut text.lines {
+        for span in &mut line.spans {
+            let fg = span.style.fg.unwrap_or(ratatui::style::Color::Reset);
+            span.style = span
+                .style
+                .fg(dim_color(fg, opacity))
+                .remove_modifier(Modifier::REVERSED);
+        }
     }
 }
 
@@ -192,17 +188,7 @@ impl PreviewState {
         if self.cached_opacity != opacity {
             let mut text = self.parsed.clone();
             if let Some(opacity) = opacity {
-                for line in &mut text.lines {
-                    for span in &mut line.spans {
-                        span.style = span
-                            .style
-                            .fg(dim_color(
-                                span.style.fg.unwrap_or(ratatui::style::Color::Reset),
-                                opacity,
-                            ))
-                            .remove_modifier(Modifier::REVERSED);
-                    }
-                }
+                dim_text(&mut text, opacity);
             }
             self.dimmed = Paragraph::new(text);
             self.cached_opacity = opacity;
@@ -304,6 +290,32 @@ impl PreviewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cached paragraph the preview renders dims every span, drops reverse
+    /// video, and rebuilds when the content changes.
+    #[test]
+    fn cached_paragraph_dims_and_follows_new_content() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
+        let render = |state: &mut PreviewState| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+            state
+                .paragraph(Some(0.4))
+                .clone()
+                .render(buf.area, &mut buf);
+            buf
+        };
+        let mut state = PreviewState::new();
+        state.set_content("\x1b[31;7mred\x1b[0m", 1);
+        let buf = render(&mut state);
+        assert_eq!(buf[(0, 0)].symbol(), "r");
+        assert_eq!(buf[(0, 0)].fg, dim_color(Color::Red, 0.4));
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
+
+        state.set_content("\x1b[32mgreen\x1b[0m", 1);
+        let buf = render(&mut state);
+        assert_eq!(buf[(0, 0)].symbol(), "g");
+        assert_eq!(buf[(0, 0)].fg, dim_color(Color::Green, 0.4));
+    }
 
     #[test]
     fn test_preview_state_scrolling() {

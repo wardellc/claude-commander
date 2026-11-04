@@ -11,15 +11,13 @@ import 'api/mirrors.dart';
 import 'api/query.dart';
 import 'api/registry.dart';
 import 'api/review.dart';
+import 'api/session_editor.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
 import 'api/workspace.dart';
-
 import 'dart:async';
 import 'dart:convert';
-
 import 'frb_generated.dart';
-
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_web.dart';
 import 'package:uuid/uuid.dart';
 
@@ -119,6 +117,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CloneRequestDto dco_decode_box_autoadd_clone_request_dto(dynamic raw);
 
   @protected
+  CreateOptions dco_decode_box_autoadd_create_options(dynamic raw);
+
+  @protected
   DiffStatDto dco_decode_box_autoadd_diff_stat_dto(dynamic raw);
 
   @protected
@@ -150,6 +151,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SessionId dco_decode_box_autoadd_session_id(dynamic raw);
+
+  @protected
+  SessionInfo dco_decode_box_autoadd_session_info(dynamic raw);
 
   @protected
   SetWorkspacesRequestDto dco_decode_box_autoadd_set_workspaces_request_dto(
@@ -356,6 +360,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CloneJobDto? dco_decode_opt_box_autoadd_clone_job_dto(dynamic raw);
+
+  @protected
+  CreateOptions? dco_decode_opt_box_autoadd_create_options(dynamic raw);
 
   @protected
   DiffStatDto? dco_decode_opt_box_autoadd_diff_stat_dto(dynamic raw);
@@ -615,6 +622,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CreateOptions sse_decode_box_autoadd_create_options(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DiffStatDto sse_decode_box_autoadd_diff_stat_dto(
     SseDeserializer deserializer,
   );
@@ -662,6 +674,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SessionId sse_decode_box_autoadd_session_id(SseDeserializer deserializer);
+
+  @protected
+  SessionInfo sse_decode_box_autoadd_session_info(SseDeserializer deserializer);
 
   @protected
   SetWorkspacesRequestDto sse_decode_box_autoadd_set_workspaces_request_dto(
@@ -912,6 +927,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CloneJobDto? sse_decode_opt_box_autoadd_clone_job_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  CreateOptions? sse_decode_opt_box_autoadd_create_options(
     SseDeserializer deserializer,
   );
 
@@ -1243,6 +1263,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_create_options(
+    CreateOptions self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_diff_stat_dto(
     DiffStatDto self,
     SseSerializer serializer,
@@ -1302,6 +1328,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_session_id(
     SessionId self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_session_info(
+    SessionInfo self,
     SseSerializer serializer,
   );
 
@@ -1641,6 +1673,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_clone_job_dto(
     CloneJobDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_create_options(
+    CreateOptions? self,
     SseSerializer serializer,
   );
 

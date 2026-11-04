@@ -16,20 +16,30 @@ use chrono::{DateTime, Utc};
 use flutter_rust_bridge::frb;
 use uuid::Uuid;
 
+pub use claude_commander_protocol::agent_status::{AgentStatusSource, AgentTurnOutcome};
 pub use claude_commander_protocol::api::{
     BranchInfo, CodeHostStatus, CreateOptions, OperationKind, ProgramInfo, PullBlockReason,
     ServerStatus, SessionDetail, SessionInfo,
 };
+pub use claude_commander_protocol::approval::{
+    ApprovalRule, ApprovalRuleKind, ApprovalStatus, ApprovalSummary,
+};
 pub use claude_commander_protocol::github::{CloneJobId, GithubRepo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
-pub use claude_commander_protocol::approval::{ApprovalStatus, ApprovalRuleKind, ApprovalRule, ApprovalSummary};
 pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
-pub use claude_commander_protocol::agent_status::{AgentStatusSource, AgentTurnOutcome};
 
 #[frb(mirror(AgentStatusSource))]
-pub enum _AgentStatusSource { Terminal, Hook }
+pub enum _AgentStatusSource {
+    Terminal,
+    Hook,
+}
 #[frb(mirror(AgentTurnOutcome))]
-pub enum _AgentTurnOutcome { Completed, Failed, RateLimited, Interrupted }
+pub enum _AgentTurnOutcome {
+    Completed,
+    Failed,
+    RateLimited,
+    Interrupted,
+}
 pub use claude_commander_protocol::workspace::WorkspaceDef;
 pub use claude_commander_protocol::ws::AttachKind;
 
@@ -75,10 +85,24 @@ pub enum _ReviewDecision {
 }
 
 #[frb(mirror(ApprovalStatus))]
-pub enum _ApprovalStatus { Unapproved, NeedsCodeOwner, NeedsApprovals, Approved, NotRequired, Blocked, Unknown }
+pub enum _ApprovalStatus {
+    Unapproved,
+    NeedsCodeOwner,
+    NeedsApprovals,
+    Approved,
+    NotRequired,
+    Blocked,
+    Unknown,
+}
 
 #[frb(mirror(ApprovalRuleKind))]
-pub enum _ApprovalRuleKind { AnyApprover, Regular, CodeOwner, ReportApprover, Other }
+pub enum _ApprovalRuleKind {
+    AnyApprover,
+    Regular,
+    CodeOwner,
+    ReportApprover,
+    Other,
+}
 
 #[frb(mirror(ApprovalRule))]
 pub struct _ApprovalRule {
@@ -450,7 +474,9 @@ pub struct AgentStatesSnapshotDto {
 impl From<AgentStatesSnapshot> for AgentStatesSnapshotDto {
     fn from(s: AgentStatesSnapshot) -> Self {
         Self {
-            observations: s.observations.into_iter()
+            observations: s
+                .observations
+                .into_iter()
                 .filter(|(id, _)| *id != COMMANDER_SENTINEL_ID)
                 .map(|(session_id, o)| AgentObservationDto {
                     session_id,
@@ -459,7 +485,8 @@ impl From<AgentStatesSnapshot> for AgentStatesSnapshotDto {
                     last_outcome: o.last_outcome,
                     completed_turns: o.completed_turns,
                     generation: o.generation,
-                }).collect(),
+                })
+                .collect(),
             states: s
                 .states
                 .into_iter()

@@ -275,7 +275,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | palette only | Reset session — restart it with **no** resume, so the agent starts a new conversation. Use it when `resume_session = true` but you want a clean slate, or when resuming is itself what breaks the relaunch. The worktree, branch and commits are untouched. Unbound by default so a mistyped `R` can't discard a conversation; bind `reset_session` under `[keybindings]` if you want a key |
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
-| palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`, `omp`) for the selected session and relaunch it with a fresh conversation |
+| palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`, `omp`, `muse-code`) for the selected session and relaunch it with a fresh conversation |
 | palette only | Set session base (restack) — re-point the selected session at a different stack parent, or unstack it onto the project's main branch |
 | `g` | Generate AI summary (available while an Info surface is showing — the modal or the right pane's Info tab) |
 | `Tab` / `Shift-Tab` | Cycle the right pane forward / back through Preview, Info and Shell (list views only; the board is full-screen). A project row has no agent pane, so it cycles Shell ↔ Info |
@@ -343,7 +343,7 @@ backend as you make them.
 
 ### Editing a session
 
-Use **Edit session** in the terminal command palette (`Shift+E`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. Stack-base changes update metadata and the PR target without rebasing git history.
+Use **Edit session** in the terminal command palette (`Shift+E`), browser toolbar or session menu, or Flutter session overflow menu. Edit the name, program, section, stack base and keep-alive setting. Program changes can restart fresh immediately or wait for the next restart, leaving the current agent running. A saved change is applied by the next explicit restart, which starts fresh under the new program (no `--resume`, since the previous agent's conversation belongs to a different CLI); waking a hibernated session and automatic recovery of an exited agent keep the current program until then. Stack-base changes update metadata and the PR target without rebasing git history.
 
 ## Web UI
 
@@ -394,6 +394,13 @@ detail, then the live agent terminal. It ships two themes, **Mission Control**
 
 Above it, the same page bodies become a desktop layout: the fleet list beside a
 workspace whose Overview / Agent / Shell / Changes tabs switch in place.
+
+The **Edit session** dialog lets you change the name, configured program, section, stack base, and keep-alive setting. Program changes can restart immediately or wait for an explicit restart, which then starts fresh under the new program (see [Editing a session](#editing-a-session)).
+
+<p align="center">
+  <img src="docs/images/client-edit-session.png" alt="Edit session dialog with configured program aliases and session settings" width="45%">
+  <img src="docs/images/client-edit-session-warning.png" alt="Restart warning offering to restart and clear or save for the next restart" width="45%">
+</p>
 
 ![The client on the desktop: fleet list on the left, the selected session's live agent terminal on the right](docs/images/client-desktop.png)
 

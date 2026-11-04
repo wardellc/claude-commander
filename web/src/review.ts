@@ -102,6 +102,14 @@ async function reloadReview(): Promise<void> {
 function renderReview(): void {
   const snap = snapshot;
   if (!snap) return;
+  // A reload (comment add/delete/apply) rebuilds every chunk. Off-screen
+  // chunks are rebuilt unmounted at an estimated height, so restoring the old
+  // scrollTop over estimates would land rows away; carry each chunk's measured
+  // height across instead, and let the observer mount whatever is in view.
+  const top = rv.body.scrollTop;
+  const heights = new Map<string, number>();
+  for (const chunk of rv.body.querySelectorAll<HTMLElement>(".rv-chunk"))
+    heights.set(chunk.dataset.key ?? "", chunk.offsetHeight);
   rowsObserver?.disconnect();
   rowsObserver = null;
   clear(rv.body);
@@ -112,10 +120,25 @@ function renderReview(): void {
     return;
   }
   const reviewed = new Set(snap.reviewed ?? []);
-  for (const f of files) rv.body.append(renderFile(f, snap.comments, reviewed));
+  for (const f of files) rv.body.append(renderFile(f, snap.comments, reviewed, heights));
+  rv.body.scrollTop = top;
 }
 
-function renderFile(f: FileDiff, comments: readonly Comment[], reviewed: Set<string>): HTMLElement {
+/** A row chunk whose rows are built only once it scrolls near the viewport. */
+type LazyChunk = HTMLElement & { mountRows?: () => void };
+
+function mountChunk(chunk: LazyChunk): void {
+  chunk.mountRows?.();
+  rowsObserver?.unobserve(chunk);
+  delete chunk.mountRows;
+}
+
+function renderFile(
+  f: FileDiff,
+  comments: readonly Comment[],
+  reviewed: Set<string>,
+  heights: ReadonlyMap<string, number>,
+): HTMLElement {
   const dp = displayPath(f);
   const cb = h("input");
   cb.type = "checkbox";
@@ -175,9 +198,15 @@ function renderFile(f: FileDiff, comments: readonly Comment[], reviewed: Set<str
   }
   for (let start = 0; start < rows.length; start += ROWS_PER_CHUNK) {
     const chunkRows = rows.slice(start, start + ROWS_PER_CHUNK);
-    const chunk = h("div", { className: "rv-chunk" });
-    // Estimate only until the chunk is visible. Real rows retain wrapping.
-    chunk.style.minHeight = `${chunkRows.length * 20}px`;
+    const chunk: LazyChunk = h("div", { className: "rv-chunk" });
+    // Keyed by position so a reload of the same review finds the height this
+    // chunk measured last time; a comment added or deleted shifts only the
+    // rows after it, which the reader has not scrolled past.
+    const key = `${dp}#${start}`;
+    chunk.dataset.key = key;
+    // Until the chunk is visible, hold its last measured height, else an
+    // estimate. Real rows retain wrapping.
+    chunk.style.minHeight = `${heights.get(key) ?? chunkRows.length * 20}px`;
     const mount = () => {
       chunk.style.minHeight = "";
       chunk.replaceChildren(...chunkRows.map((row) => row()));
@@ -185,17 +214,13 @@ function renderFile(f: FileDiff, comments: readonly Comment[], reviewed: Set<str
     if (typeof IntersectionObserver === "undefined") mount();
     else {
       rowsObserver ??= new IntersectionObserver(
-        (entries, observer) => {
+        (entries) => {
           for (const entry of entries)
-            if (entry.isIntersecting) {
-              (entry.target as HTMLElement & { mountRows?: () => void }).mountRows?.();
-              observer.unobserve(entry.target);
-              delete (entry.target as HTMLElement & { mountRows?: () => void }).mountRows;
-            }
+            if (entry.isIntersecting) mountChunk(entry.target as LazyChunk);
         },
         { root: rv.body, rootMargin: "800px" },
       );
-      (chunk as HTMLElement & { mountRows?: () => void }).mountRows = mount;
+      chunk.mountRows = mount;
       rowsObserver.observe(chunk);
     }
     wrap.append(chunk);
@@ -288,7 +313,9 @@ async function deleteComment(cid: string): Promise<void> {
 
 async function toggleReviewed(dp: string, cb: HTMLInputElement): Promise<void> {
   if (!sessionId) return;
-  const res = await act(api.toggleReviewed(sessionId, { display_path: dp }));
+  // Send the state the box now shows rather than toggling the store, which
+  // may hold a mark this page isn't showing (set by the CLI since it loaded).
+  const res = await act(api.toggleReviewed(sessionId, { display_path: dp, reviewed: cb.checked }));
   if (res && typeof res.value?.reviewed === "boolean") cb.checked = res.value.reviewed;
   else cb.checked = !cb.checked; // revert on failure
 }

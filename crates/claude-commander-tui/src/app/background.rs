@@ -12,6 +12,11 @@
 
 use super::*;
 
+/// A remote session's marks poll runs once per this many local ones (~5s):
+/// each is a round trip to the server, and an agent's marks don't need to
+/// land within the second.
+const REMOTE_MARKS_POLL_EVERY: u64 = 5;
+
 impl App {
     /// Whether an Info surface is currently showing: the `i` modal, or the list
     /// views' right-pane Info tab. The enriched-PR and AI-summary fetches feed
@@ -192,12 +197,53 @@ impl App {
         });
     }
 
+    /// Poll the open review's stored reviewed marks so marks set outside this
+    /// view (the `review` CLI — typically an agent — or another frontend)
+    /// appear without a reopen. One small store read, no diff compose, so it
+    /// is cheap enough to run every second for a local session; a remote one
+    /// costs an HTTP round trip, so it runs every [`REMOTE_MARKS_POLL_EVERY`]
+    /// calls instead. Called once a second; `second` counts those calls. A
+    /// failed poll is silent: the next one retries, and the view is never
+    /// wrong, only late.
+    pub(super) fn spawn_reviewed_marks_poll(&mut self, second: u64) {
+        if self.ui_state.reviewed_poll_in_flight {
+            return;
+        }
+        let Some((session_id, generation)) = self
+            .open_review()
+            .map(|state| (state.session_id, state.reviewed_gen))
+        else {
+            return;
+        };
+        let backend_id = self.backend_of_session(session_id);
+        if backend_id != LOCAL_BACKEND_ID && !second.is_multiple_of(REMOTE_MARKS_POLL_EVERY) {
+            return;
+        }
+        self.ui_state.reviewed_poll_in_flight = true;
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let marks = backend
+                .reviewed_marks(session_id)
+                .await
+                .inspect_err(|e| debug!("Reviewed-marks poll failed: {e}"))
+                .ok();
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ReviewedMarksPolled {
+                    session_id,
+                    generation,
+                    marks,
+                }))
+                .await;
+        });
+    }
+
     /// Spawn background fetches for Info modal data (enriched PR + AI summary).
     ///
     /// Gated on the Info modal being open (a no-op otherwise) and guarded
-    /// against double-spawns: `update_selection` calls this every tick (via
-    /// `refresh_list_items`), so without the in-flight guard an open Info modal
-    /// would re-spawn a duplicate `gh` fetch each tick until the first resolves.
+    /// against double-spawns: `update_selection` calls this, and it runs on
+    /// every selection/list refresh, so without the in-flight guard an open Info modal
+    /// would re-spawn a duplicate `gh` fetch on each input or refresh until the first resolves.
     pub(super) fn spawn_info_fetch(&mut self) {
         // Only relevant when the Info modal is open; a no-op otherwise.
         if !self.is_info_open() {
@@ -265,6 +311,7 @@ impl App {
             let spawned_at = Instant::now();
             self.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
 
+            let code_host = code_host.host();
             let provider = code_host.provider;
             tokio::spawn(async move {
                 let info = if let Some(repo_path) = repo_path {
@@ -280,6 +327,7 @@ impl App {
                     .send(AppEvent::StateUpdate(StateUpdate::EnrichedPrReady {
                         spawned_at,
                         session_id,
+                        code_host,
                         info,
                     }))
                     .await;

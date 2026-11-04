@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+#[path = "cases/edit_session.rs"]
+mod edit_session_cases;
+
 use claude_commander_core::SessionStatus;
 use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};
@@ -2389,127 +2392,230 @@ async fn ensure_project_deduplicates_a_non_canonical_spelling_of_the_same_repo()
     );
 }
 
-/// Saving a different harness keeps the old pane alive; the next restart must
-/// consume the pending command and launch fresh even when resume is enabled.
+/// Run a tmux command against an isolated server (its own `TMUX_TMPDIR`, no
+/// inherited `$TMUX`), returning trimmed stdout. Panics on a spawn failure.
+async fn tmux_iso(tmpdir: &std::path::Path, args: &[&str]) -> String {
+    let out = tokio::process::Command::new("tmux")
+        .args(args)
+        .env("TMUX_TMPDIR", tmpdir)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .await
+        .expect("failed to spawn tmux");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A `HeadlessAttach` to a `window-size manual` session (the birth default, born
+/// at 200×50) must fit the tmux window to the *attaching* client. Without the
+/// `resize-window -A` the attach issues, a `manual` window ignores the pty's
+/// SIGWINCH and keeps painting 200-column lines, which a narrower client (a
+/// phone/browser) then wraps into a scrambled mess — the bug this guards against.
+/// A subsequent `ResizeHandle::resize` must move it again.
+///
+/// The window ends up one row *shorter* than the client (80×24 client → 80×23
+/// window): `-A` fits the window to the client the way the client's own resize
+/// would, reserving a row for tmux's status bar. That off-by-one is the whole
+/// reason for `-A` over a fixed `-x`/`-y`, so the assertions pin it.
 #[tokio::test]
-async fn test_edit_session_program_restart_choices() {
-    use claude_commander_core::api::CommanderService;
-    use claude_commander_core::telemetry::FrontendInfo;
-    use claude_commander_protocol::api::EditSession;
+async fn headless_attach_resizes_a_manual_window_to_the_client() {
+    use claude_commander_core::tmux::HeadlessAttach;
+
     if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
         return;
     }
-    for restart in [false, true] {
-        let (_repo_dir, repo_path) = create_test_repo().await;
-        let state_dir = TempDir::new().unwrap();
-        let worktrees = TempDir::new().unwrap();
-        let fake_codex = state_dir.path().join("codex");
-        std::fs::write(&fake_codex, "#!/bin/sh\nexec cat\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let new_program = fake_codex.to_string_lossy().into_owned();
-        let config = Config {
-            resume_session: true,
-            worktrees_dir: Some(worktrees.path().to_path_buf()),
-            ..Config::default()
-        };
-        let config_store = create_isolated_config_store(&state_dir, config);
-        let store = create_isolated_store(&state_dir);
-        let manager = SessionManager::new(config_store.clone(), store.clone(), "");
-        let service = CommanderService::new(
-            config_store,
-            store.clone(),
-            FrontendInfo::new("integration-test", "0.0.0"),
-        );
-        let project = manager.add_project(repo_path, None).await.unwrap();
-        let sid = manager
-            .prepare_session(&project, "edit-test".into(), Some("sleep 60".into()), None)
-            .await
-            .unwrap();
-        manager.finalize_session(&sid, None, None).await.unwrap();
-        let tmux_name = store
-            .read()
-            .await
-            .get_session(&sid)
-            .unwrap()
-            .tmux_session_name
-            .clone();
-        let pid_before = manager
-            .tmux
-            .execute(&["display-message", "-p", "-t", &tmux_name, "#{pane_pid}"])
-            .await
-            .unwrap();
-        service
-            .edit_session(
-                &sid,
-                EditSession {
-                    title: "edited".into(),
-                    program: new_program.clone(),
-                    section: None,
-                    keep_alive: true,
-                    base: None,
-                    restart,
-                },
-            )
-            .await
-            .unwrap();
-        {
-            let state = store.read().await;
-            let session = state.get_session(&sid).unwrap();
-            assert_eq!(session.title, "edited");
-            assert!(session.keep_alive);
-            assert_eq!(session.status, SessionStatus::Running);
-            if restart {
-                assert_eq!(session.program, new_program);
-                assert!(session.pending_program.is_none());
-            } else {
-                assert_eq!(session.program, "sleep 60");
-                assert_eq!(
-                    session.pending_program.as_deref(),
-                    Some(new_program.as_str())
-                );
-            }
-        }
-        let pid_after = manager
-            .tmux
-            .execute(&["display-message", "-p", "-t", &tmux_name, "#{pane_pid}"])
-            .await
-            .unwrap();
-        if restart {
-            assert_ne!(pid_before, pid_after);
-        } else {
-            assert_eq!(pid_before, pid_after);
-        }
-        if !restart {
-            service.restart_session(&sid).await.unwrap();
-        }
-        let tmux = {
-            let state = store.read().await;
-            let session = state.get_session(&sid).unwrap();
-            assert_eq!(session.program, new_program);
-            assert!(session.pending_program.is_none());
-            session.tmux_session_name.clone()
-        };
-        let command = manager
-            .tmux
-            .execute(&[
+
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    let session = "cc-resize-test";
+
+    // A session born the way core births them: wide, and pinned with
+    // `window-size manual` so it holds that size while detached.
+    tmux_iso(
+        sock,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "sh",
+            "-c",
+            "while true; do sleep 1; done",
+        ],
+    )
+    .await;
+    tmux_iso(
+        sock,
+        &["set-option", "-t", session, "window-size", "manual"],
+    )
+    .await;
+    tmux_iso(
+        sock,
+        &["resize-window", "-t", session, "-x", "200", "-y", "50"],
+    )
+    .await;
+
+    let size = |sock: std::path::PathBuf, session: &'static str| async move {
+        tmux_iso(
+            &sock,
+            &[
                 "display-message",
-                "-p",
                 "-t",
-                &tmux,
-                "#{pane_start_command}",
-            ])
-            .await
-            .unwrap();
-        assert!(
-            !command.contains("resume --last"),
-            "new harness must launch fresh: {command}"
-        );
-        assert!(manager.tmux.session_exists(&tmux).await.unwrap());
-        assert!(!manager.tmux.is_pane_dead(&tmux).await.unwrap());
-        manager.kill_session(&sid, false).await.unwrap();
+                session,
+                "-p",
+                "#{window_width}x#{window_height}",
+            ],
+        )
+        .await
+    };
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "200x50",
+        "precondition: the detached manual window is wide"
+    );
+
+    // Attach at a much smaller size, as a phone/browser would. The window fits
+    // the 80×24 client minus the status-bar row → 80×23.
+    let attach = HeadlessAttach::spawn(session, 80, 24, Some(sock)).expect("spawn attach");
+    // Give tmux a moment to apply the resize-window the spawn issued.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "80x23",
+        "the attach must fit the manual window to the client (less the status row)"
+    );
+
+    // A later resize (a browser window resize) must move it again: 120×40 client
+    // → 120×39 window.
+    let (_r, _w, resize, mut child) = attach.split();
+    resize.resize(120, 40);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "120x39",
+        "a ResizeHandle::resize must re-fit the manual window"
+    );
+
+    child.kill().await;
+    tmux_iso(sock, &["kill-server"]).await;
+}
+
+/// The live-server bug: a lingering *wide* client (a browser tab that never
+/// cleanly detached, a left-open TUI) keeps a `window-size manual` window wide,
+/// so `resize-window -A` — which fits to the *largest* client — leaves it wide
+/// and a new narrow attach is still scrambled. The attach's `-d` flag must
+/// detach that other client first, so the window fits the new narrow one.
+///
+/// Reproduces exactly what was seen on the VM: a 200-col client held the window
+/// at 200 while an 80-col phone attach wrapped every line.
+#[tokio::test]
+async fn headless_attach_detaches_a_lingering_wide_client() {
+    use claude_commander_core::tmux::HeadlessAttach;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
     }
+
+    let tmp = TempDir::new().unwrap();
+    let sock = tmp.path();
+    let session = "cc-multi-client";
+
+    tmux_iso(
+        sock,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "sh",
+            "-c",
+            "while true; do sleep 1; done",
+        ],
+    )
+    .await;
+    tmux_iso(
+        sock,
+        &["set-option", "-t", session, "window-size", "manual"],
+    )
+    .await;
+
+    let size = |sock: std::path::PathBuf, session: &'static str| async move {
+        tmux_iso(
+            &sock,
+            &[
+                "display-message",
+                "-t",
+                session,
+                "-p",
+                "#{window_width}x#{window_height}",
+            ],
+        )
+        .await
+    };
+
+    // A wide client attaches first and stays — the lingering 205-col client.
+    let wide = HeadlessAttach::spawn(session, 205, 58, Some(sock)).expect("spawn wide attach");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "205x57",
+        "precondition: the wide client holds the window wide"
+    );
+
+    // Now a narrow client attaches. `-d` must detach the wide one, so `-A` fits
+    // the window to the narrow client (80×24 → 80×23) rather than staying at the
+    // wide client's size.
+    let narrow = HeadlessAttach::spawn(session, 80, 24, Some(sock)).expect("spawn narrow attach");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        size(sock.to_path_buf(), session).await,
+        "80x23",
+        "the narrow attach must detach the wide client and fit the window to itself"
+    );
+
+    let (_wr, _ww, _wre, mut wide_child) = wide.split();
+    let (_nr, _nw, _nre, mut narrow_child) = narrow.split();
+    wide_child.kill().await;
+    narrow_child.kill().await;
+    tmux_iso(sock, &["kill-server"]).await;
+}
+
+/// Recreating a server's only session straight after killing it races the
+/// server's shutdown: `kill-session` returns as soon as the session is gone,
+/// while the server is still exiting, and a `new-session` that connects in that
+/// window fails with "server exited unexpectedly". Every kill-then-recreate
+/// path (fresh restart, change program, restart) hits it whenever the pane is
+/// the last on its server — always so on CI's empty server. Looped because a
+/// single attempt only loses the race some of the time.
+#[tokio::test]
+async fn recreating_the_only_session_survives_server_shutdown() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let socket_temp = TempDir::new().unwrap();
+    let tmux = TmuxExecutor::new().with_tmux_tmpdir(Some(isolated_tmux_tmpdir(&socket_temp)));
+    let cwd = TempDir::new().unwrap();
+
+    tmux.create_session("only", cwd.path(), Some("sleep 60"))
+        .await
+        .unwrap();
+    for attempt in 0..20 {
+        tmux.kill_session("only").await.unwrap();
+        tmux.create_session("only", cwd.path(), Some("sleep 60"))
+            .await
+            .unwrap_or_else(|e| panic!("recreate #{attempt} failed: {e}"));
+    }
+    tmux.kill_session("only").await.unwrap();
 }

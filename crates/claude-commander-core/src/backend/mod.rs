@@ -54,6 +54,7 @@ use crate::api::{
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
 use claude_commander_protocol::hosting::RepositoryListing;
 use claude_commander_protocol::workspace::SetWorkspacesRequest;
@@ -623,24 +624,17 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId>;
     async fn kill_session(&self, id: SessionId) -> BResult<()>;
     async fn restart_session(&self, id: SessionId) -> BResult<()>;
-    /// Restart a session with a *fresh* agent conversation (no `--resume`),
-    /// discarding whatever the agent would otherwise have resumed. Two callers:
-    /// the attach loop, when the agent process exits mid-attach, and the
-    /// operator's Reset command.
-    ///
-    /// Deliberately **required**, not defaulted. It was defaulted to
-    /// `restart_session` while only [`LocalBackend`] implemented it, which meant
-    /// a remote session's "fresh" restart silently *resumed* — the one thing the
-    /// caller asked it not to do. Every backend now answers for itself, so a
-    /// backend that cannot restart fresh has to say so rather than quietly
-    /// doing the opposite.
+    /// Explicitly reset a session, starting a fresh conversation and applying
+    /// any pending program. Automatic recovery uses `recover_session_fresh`.
     async fn restart_session_fresh(&self, id: SessionId) -> BResult<()>;
+    /// Automatically recover an exited agent, retaining its live and pending programs.
+    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()>;
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn edit_session(
         &self,
         id: SessionId,
         edit: claude_commander_protocol::api::EditSession,
-    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>>;
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome>;
 
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
     /// Change a session's launch program (the agent harness that runs) and
@@ -833,8 +827,21 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_comment(&self, id: SessionId, draft: NewComment) -> BResult<Uuid>;
     async fn delete_comment(&self, id: SessionId, comment_id: Uuid) -> BResult<()>;
     async fn apply_comments(&self, id: SessionId) -> BResult<ApplyOutcome>;
-    /// Toggle a file's reviewed mark by display path against the current diff.
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool>;
+    /// Set or clear a file's reviewed mark by display path against the current
+    /// diff, returning the new state. Explicit rather than a toggle: the view
+    /// says which way the user meant, so a mark set elsewhere since the view
+    /// last refreshed can't turn a "mark" keypress into an unmark.
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool>;
+    /// The session's stored reviewed marks, unpruned. Polled by an open
+    /// review view to pick up marks set elsewhere (the CLI, another frontend);
+    /// a mark applies only to the file content it is pinned to
+    /// (`claude_commander_viewmodel::review::fold_marks`).
+    async fn reviewed_marks(&self, id: SessionId) -> BResult<Vec<ReviewedFileMark>>;
     /// Raw bytes of one side of a binary file in a session's review diff.
     async fn fetch_diff_blob(
         &self,

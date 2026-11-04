@@ -111,15 +111,8 @@ abstract class CommanderApi {
   Future<String?> editSession({
     required String handle,
     required String id,
-    required String title,
-    required String program,
-    String? section,
-    required bool keepAlive,
-    required bool changeBase,
-    String? parentId,
-    required bool restart,
+    required String patchJson,
   });
-
   Future<void> renameSession({
     required String handle,
     required String id,
@@ -346,10 +339,11 @@ abstract class CommanderApi {
     required String sessionId,
   });
 
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
+    required bool reviewed,
   });
 
   Future<Uint8List> fetchBlob({
@@ -569,25 +563,8 @@ class RustCommanderApi implements CommanderApi {
   Future<String?> editSession({
     required String handle,
     required String id,
-    required String title,
-    required String program,
-    String? section,
-    required bool keepAlive,
-    required bool changeBase,
-    String? parentId,
-    required bool restart,
-  }) => simple.editSession(
-    handle: handle,
-    id: id,
-    title: title,
-    program: program,
-    section: section,
-    keepAlive: keepAlive,
-    changeBase: changeBase,
-    parentId: parentId,
-    restart: restart,
-  );
-
+    required String patchJson,
+  }) => simple.editSession(handle: handle, id: id, patchJson: patchJson);
   @override
   Future<void> renameSession({
     required String handle,
@@ -828,14 +805,16 @@ class RustCommanderApi implements CommanderApi {
   }) => review.applyComments(handle: handle, sessionId: sessionId);
 
   @override
-  Future<bool> toggleFileReviewed({
+  Future<bool> setFileReviewed({
     required String handle,
     required String sessionId,
     required String displayPath,
-  }) => review.toggleFileReviewed(
+    required bool reviewed,
+  }) => review.setFileReviewed(
     handle: handle,
     sessionId: sessionId,
     displayPath: displayPath,
+    reviewed: reviewed,
   );
 
   @override

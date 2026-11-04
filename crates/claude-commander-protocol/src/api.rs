@@ -32,9 +32,9 @@ pub struct SessionInfo {
     pub title: String,
     pub branch: String,
     pub status: SessionStatus,
-    // Program used by the current agent pane.
+    /// Program used by the current agent pane.
     pub program: String,
-    // Program saved for the next fresh restart, if different from the live one.
+    /// Program saved for the next fresh restart, if different from the live one.
     #[serde(default)]
     pub pending_program: Option<String>,
     pub project_id: ProjectId,
@@ -120,14 +120,21 @@ pub struct NewComment {
     pub comment: String,
 }
 
-/// Request to toggle a file's reviewed mark. Carries only the display path —
-/// the server resolves the file in the *current* review diff and hashes that,
-/// so clients never echo (or cache) the full `FileDiff` and a mark can't be
-/// recorded against a stale copy of the file.
+/// Request to toggle (or set) a file's reviewed mark. Carries only the display
+/// path — the server resolves the file in the *current* review diff and hashes
+/// that, so clients never echo (or cache) the full `FileDiff` and a mark can't
+/// be recorded against a stale copy of the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToggleReviewed {
     pub display_path: String,
+    /// The state the client wants, from what *it* shows; absent toggles. A
+    /// view whose copy of the file is older than the stored mark (set by the
+    /// CLI meanwhile) would otherwise flip that mark off when the user meant
+    /// to mark the file. Additive: an older server ignores it and toggles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub reviewed: Option<bool>,
 }
 
 /// Which side of a diff a binary blob fetch refers to: the base ("before") or
@@ -370,6 +377,17 @@ impl Default for CodeHostStatus {
     }
 }
 
+impl CodeHostStatus {
+    /// The host this status describes — provider and hostname, without the
+    /// CLI-availability probe — for comparing hosts and tagging host-bound data.
+    pub fn host(&self) -> crate::hosting::CodeHost {
+        crate::hosting::CodeHost {
+            provider: self.provider,
+            hostname: self.hostname.clone(),
+        }
+    }
+}
+
 impl ServerStatus {
     /// Compatibility view for responses from servers predating `code_host`.
     pub fn effective_code_host(&self) -> CodeHostStatus {
@@ -596,17 +614,42 @@ pub struct ChangeProgram {
 
 /// All editable session settings. Omit `base` to preserve the current stack base.
 /// Program changes can be saved for the next restart, or launched fresh now.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EditSession {
-    pub title: String,
-    pub program: String,
-    pub section: Option<String>,
-    pub keep_alive: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// Missing preserves the assignment; null clears the manual override.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "edit_section"
+    )]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub section: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<SetSessionBase>,
     #[serde(default)]
     pub restart: bool,
+}
+
+fn edit_section<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// Local settings are saved before best-effort external operations run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct EditSessionOutcome {
+    pub restarted: bool,
+    pub base: Option<SetSessionBaseOutcome>,
+    pub warnings: Vec<String>,
 }
 
 /// `PATCH /sessions/{id}` body: rename a session, move it to a section
@@ -643,6 +686,19 @@ pub struct CreatedId<T> {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReviewedToggle {
     pub reviewed: bool,
+}
+
+/// `GET /sessions/{id}/files/reviewed` element: one stored reviewed mark, as
+/// persisted — *not* pruned against the current diff, since that would cost a
+/// compose per poll. A mark only applies to the copy of the file whose diff
+/// hashes to `hash`; `claude_commander_viewmodel::review` holds the hash and
+/// the rules for applying a polled mark, shared by every frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedFileMark {
+    /// Display path of the marked file.
+    pub file: String,
+    /// Hex hunk hash of the file at mark time.
+    pub hash: String,
 }
 
 /// `POST /projects/scan` response: how many repositories under the scanned
@@ -720,6 +776,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ReviewedToggle { reviewed: true }).unwrap(),
             r#"{"reviewed":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReviewedFileMark {
+                file: "src/a.rs".into(),
+                hash: "00000000000000ff".into()
+            })
+            .unwrap(),
+            r#"{"file":"src/a.rs","hash":"00000000000000ff"}"#
         );
         assert_eq!(
             serde_json::to_string(&ScanResponse {

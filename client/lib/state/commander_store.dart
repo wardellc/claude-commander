@@ -296,7 +296,7 @@ class CommanderStore extends ChangeNotifier {
   /// never acquired, else just refetch.
   Future<void> retry() => _handle == null ? connect() : _refresh();
 
-  // --- mutations (thin wrappers; the next change-feed tick refreshes state) --
+  // --- mutations (thin wrappers; `_mutate` refetches the snapshot after each)
 
   Future<void> killSession(String id) =>
       _mutate(() => _api.killSession(handle: _requireHandle, id: id));
@@ -307,28 +307,14 @@ class CommanderStore extends ChangeNotifier {
   Future<void> deleteSession(String id) =>
       _mutate(() => _api.deleteSession(handle: _requireHandle, id: id));
 
-  Future<String?> editSession(
-    String id, {
-    required String title,
-    required String program,
-    String? section,
-    required bool keepAlive,
-    required bool changeBase,
-    String? parentId,
-    required bool restart,
-  }) => _mutate(
-    () => _api.editSession(
-      handle: _requireHandle,
-      id: id,
-      title: title,
-      program: program,
-      section: section,
-      keepAlive: keepAlive,
-      changeBase: changeBase,
-      parentId: parentId,
-      restart: restart,
-    ),
-  );
+  Future<String?> editSession(String id, {required String patchJson}) =>
+      _mutate(
+        () => _api.editSession(
+          handle: _requireHandle,
+          id: id,
+          patchJson: patchJson,
+        ),
+      );
 
   Future<void> renameSession(String id, String title) => _mutate(
     () => _api.renameSession(handle: _requireHandle, id: id, title: title),

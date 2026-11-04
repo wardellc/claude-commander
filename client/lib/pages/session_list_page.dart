@@ -334,10 +334,6 @@ class _SessionListBodyState extends State<SessionListBody> {
             store: store,
             workspace: workspace,
             showHeader: multi,
-            selectedId: widget.selectedId,
-            onSelect: widget.onSelect,
-            query: _query,
-            quick: _quick,
           ),
         ));
         continue;
@@ -415,6 +411,24 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
+  /// The Recent tab: every server's sessions flattened to (store, session)
+  /// pairs, active-and-attached-only, newest-attach first (the TUI's MRU
+  /// order). A live query filters that set by fuzzy score, ranking best matches
+  /// first while keeping recency as the stable tie-break; an active quick filter
+  /// narrows it further.
+  ///
+  /// Two deliberate differences from the TUI's pinned recents block, and they
+  /// go together: this tab is uncapped (the TUI caps at `recent_sessions_limit`)
+  /// *and* it excludes stopped sessions (the TUI shows any attached session
+  /// regardless of status). The TUI's fixed cap already bounds how much stale
+  /// history shows; an uncapped list has no such bound, so it filters to active
+  /// sessions to avoid accumulating dead ones indefinitely.
+  ///
+  /// A third: the ordering key is [sessionRecency], not `lastAttachedAt`, so a
+  /// never-attached session sorts by its creation time instead of dropping out.
+  /// The TUI can drop those, because its recents block is pinned *above* the
+  /// full tree; here Recent is one of two exclusive tabs, so dropping a session
+  /// hides it outright — including the one the user has only just created.
   Widget _buildRecent(
     BuildContext context,
     List<CommanderStore> servers,
@@ -455,6 +469,10 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
+  /// What to show when the flattened recent list is empty. A bare "No recent
+  /// sessions" would hide a server that is merely still connecting or down, so
+  /// mirror All mode: surface a spinner while any server is loading and an
+  /// error+Retry when one has failed, before falling back to the empty note.
   Widget _recentEmptyState(BuildContext context, List<CommanderStore> servers) {
     // Loading/error take priority over the query notes, so typing while the
     // only server is still connecting shows the spinner (as All mode does),
@@ -550,24 +568,10 @@ class _ServerSection extends StatelessWidget {
   /// The active workspace (null = Main): only its projects are listed.
   final String? workspace;
   final bool showHeader;
-  final String? selectedId;
-  final void Function(CommanderStore store, SessionInfo session) onSelect;
-
-  /// The active search query. Empty shows the full grouped list; otherwise each
-  /// group is fuzzy-filtered and emptied groups drop out.
-  final String query;
-
-  /// The active quick filter (or null), applied on top of [query].
-  final _Quick? quick;
-
   const _ServerSection({
     required this.store,
     required this.workspace,
     required this.showHeader,
-    required this.selectedId,
-    required this.onSelect,
-    required this.query,
-    required this.quick,
   });
 
   @override
@@ -613,48 +617,7 @@ class _ServerSection extends StatelessWidget {
         ),
       ];
     }
-    final groups = <ProjectSessions>[];
-    for (final g in store.sessionsByProjectIn(workspace)) {
-      var sessions = matchingSessions(g.sessions, query);
-      if (quick != null) {
-        sessions = [
-          for (final s in sessions)
-            if (_matchesQuick(quick!, store, s)) s,
-        ];
-      }
-      if (sessions.isNotEmpty) {
-        groups.add(ProjectSessions(project: g.project, sessions: sessions));
-      }
-    }
-    final filtering = query.isNotEmpty || quick != null;
-    return [
-      if (store.cascadePaused != null) const CascadeBanner(),
-      if (groups.isEmpty)
-        _InlineNote(
-          icon: filtering ? Icons.search_off : Icons.inbox_outlined,
-          text: filtering ? 'No matches' : 'No sessions',
-        )
-      else
-        for (final group in groups) ...[
-          ChromeEyebrow(
-            '${group.project.name.toUpperCase()} · ${group.sessions.length}',
-          ),
-          // Each project group is its own run, so a row's position is its index
-          // within the group rather than within the whole server section.
-          for (final (i, session) in group.sessions.indexed)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
-              child: _groupedRow(
-                context,
-                store: store,
-                session: session,
-                selected: session.id == selectedId,
-                position: _rowPosition(i, group.sessions.length),
-                onTap: () => onSelect(store, session),
-              ),
-            ),
-        ],
-    ];
+    return const [];
   }
 }
 

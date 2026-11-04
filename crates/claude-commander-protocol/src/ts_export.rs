@@ -82,6 +82,14 @@ fn export_into(dir: &Path) {
         api::PrRetarget,
         api::SetSessionBaseOutcome,
         api::ChangeProgram,
+        api::EditSession,
+        api::EditSessionOutcome,
+        crate::session_editor::SessionEditorInput,
+        crate::session_editor::SessionEditorBase,
+        crate::session_editor::SessionEditorDraft,
+        crate::session_editor::SessionEditorModel,
+        crate::session_editor::SessionEditorPlan,
+        crate::session_editor::PlanSessionEdit,
         api::PatchSession,
         api::MarkUnread,
         // Generic: the declaration is `CreatedId<T>`; the argument here only
@@ -163,6 +171,9 @@ fn constants_ts() -> String {
     format!(
         "{GENERATED_HEADER}import type {{ SessionId }} from \"./SessionId\";\n\
          \n\
+         /** Server change-wait budget in seconds. */\n\
+         export const CHANGE_WAIT_SECS = {change_wait};\n\
+         \n\
          /** `ServerControl.error` message for a rejected auth token (`ws::WS_ERR_AUTH`). */\n\
          export const WS_ERR_AUTH = {auth};\n\
          \n\
@@ -175,6 +186,7 @@ fn constants_ts() -> String {
          * rendering per-session rows.\n \
          */\n\
          export const COMMANDER_SENTINEL_ID: SessionId = {sentinel};\n",
+        change_wait = crate::CHANGE_WAIT_SECS,
         auth = ts_string(ws::WS_ERR_AUTH),
         no_session = ts_string(ws::WS_ERR_NO_SESSION),
     )

@@ -1589,6 +1589,45 @@ pub enum ConfirmAction {
     },
 }
 
+/// A session a backend refresh should act on once it appears (select it, or
+/// hydrate its LFS), with `settles_at`: the first refresh revision issued after
+/// the intent was recorded. A change-feed fetch that took its revision earlier
+/// can land later carrying a snapshot without the session, so only a snapshot
+/// at or past `settles_at` that still lacks it proves the session is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingSession {
+    pub session: SessionRef,
+    pub settles_at: u64,
+}
+
+impl PendingSession {
+    /// Whether a `BackendChanged` fold of `snapshot` at `revision` from
+    /// `backend_id` resolves this intent: `Some(true)` when the session is
+    /// present, `Some(false)` when a post-intent snapshot lacks it, `None` to
+    /// keep waiting (another backend, or a snapshot fetched too early).
+    fn settle(
+        &self,
+        backend_id: usize,
+        revision: u64,
+        snapshot: &claude_commander_core::api::Snapshot,
+    ) -> Option<bool> {
+        if self.session.backend.0 != backend_id {
+            return None;
+        }
+        if snapshot
+            .sessions
+            .iter()
+            .any(|s| s.session_id == self.session.id)
+        {
+            Some(true)
+        } else if revision >= self.settles_at {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
 /// Application UI state
 pub struct AppUiState {
     /// Active view. List modes (`ProjectGrouped`/`SectionGrouped`/
@@ -1696,7 +1735,11 @@ pub struct AppUiState {
     pub last_preview_refresh: Instant,
     pub last_ui_maintenance: Instant,
     pub last_animation: Instant,
-    pub pending_selection: Option<SessionRef>,
+    pub pending_selection: Option<PendingSession>,
+    /// Created sessions awaiting their first snapshot to start LFS hydration.
+    /// A set, so creates landing before an earlier one's refresh each keep it.
+    pub pending_created: Vec<PendingSession>,
+    pub last_recording: bool,
     pub pending_project: Option<(BackendId, ProjectId)>,
     /// Right-pane rect from the last render frame, for wheel hit-testing.
     /// `None` in board view (no right pane) and before the first frame.
@@ -1791,14 +1834,17 @@ pub struct AppUiState {
     /// Config reload is waiting on the service; ticks must not enqueue more.
     pub config_reload_in_flight: bool,
     /// When the last enriched-PR fetch was spawned (None = not in flight).
-    /// Guards `spawn_info_fetch` against double-spawns: `update_selection` now
-    /// runs it every tick (via `refresh_list_items`), so without this an open
-    /// Info modal would re-spawn a duplicate `gh` fetch each tick until the
+    /// Guards `spawn_info_fetch` against double-spawns: `update_selection`
+    /// calls it and runs on every selection/list refresh, so without this an open
+    /// Info modal would re-spawn a duplicate `gh` fetch on each input or refresh until the
     /// first resolves. Mirrors `preview_update_spawned_at`'s 5s safety window.
     pub enriched_pr_fetch_spawned_at: Option<Instant>,
     /// Whether a review-diff refresh re-compose is currently in flight, so the
     /// idle trigger and a manual refresh don't double-spawn.
     pub review_refresh_in_flight: bool,
+    /// A reviewed-marks poll for the open review is outstanding; see
+    /// `spawn_reviewed_marks_poll`.
+    pub reviewed_poll_in_flight: bool,
     /// Tick counter for animations (incremented each render tick)
     pub tick_count: u64,
     /// Throbber/spinner state for loading modals
@@ -1901,6 +1947,8 @@ impl Default for AppUiState {
             last_ui_maintenance: Instant::now(),
             last_animation: Instant::now(),
             pending_selection: None,
+            pending_created: Vec::new(),
+            last_recording: false,
             pending_project: None,
             right_pane_rect: None,
             last_pane_view: None,
@@ -1930,6 +1978,7 @@ impl Default for AppUiState {
             config_reload_in_flight: false,
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
+            reviewed_poll_in_flight: false,
             terminal_size: Rect::default(),
             theme_workspace: None,
             tick_count: 0,
@@ -2065,12 +2114,7 @@ impl AppUiState {
         for &action in BindableAction::ALL {
             if matches!(
                 action,
-                BindableAction::RenameSession
-                    | BindableAction::ChangeProgram
-                    | BindableAction::MoveToSection
-                    | BindableAction::ToggleKeepAlive
-                    | BindableAction::SetSessionBase
-                    | BindableAction::NavigateUp
+                BindableAction::NavigateUp
                     | BindableAction::NavigateDown
                     | BindableAction::NextGroup
                     | BindableAction::PreviousGroup
@@ -2486,6 +2530,16 @@ impl App {
         self.backends.iter().find(|h| h.id == id)
     }
 
+    /// A [`PendingSession`] for `session` that only a refresh issued from now on
+    /// can discard; `None` when its backend is unknown.
+    pub(super) fn pending_session(&self, session: SessionRef) -> Option<PendingSession> {
+        let sequence = &self.backend(session.backend)?.refresh_sequence;
+        Some(PendingSession {
+            session,
+            settles_at: sequence.load(std::sync::atomic::Ordering::Relaxed) + 1,
+        })
+    }
+
     /// The backend trait object for `id`, cloneable into a spawned task. Falls
     /// back to the local backend when the id is unknown (e.g. its server was
     /// just removed) so callers never panic on a stale id.
@@ -2537,6 +2591,13 @@ impl App {
     /// its connection state) untouched, so a degraded remote keeps its last
     /// snapshot rather than blanking.
     pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
+        let Some(handle) = self.backend(id) else {
+            return;
+        };
+        let revision = handle
+            .refresh_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         let backend = self.backend_arc(id);
         let old_host = self
             .backend(id)
@@ -2546,11 +2607,10 @@ impl App {
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
                 let host = snapshot.server.effective_code_host();
-                if old_host.is_some_and(|old| {
-                    old.provider != host.provider || old.hostname != host.hostname
-                }) {
+                if old_host.is_some_and(|old| old.host() != host.host()) {
                     changed_host = Some(host);
                 }
+                handle.view_revision = revision;
                 handle.view.snapshot = snapshot;
                 // Local: derive connection from the snapshot's tmux health;
                 // remote: leave it to the connection-watch task (returns None).
@@ -2561,6 +2621,7 @@ impl App {
                 }
             }
             if let Ok(states) = states {
+                handle.agent_states_revision = revision;
                 handle.view.agent_states = states;
             }
         }
@@ -2583,10 +2644,7 @@ impl App {
             self.ui_state.repo_picker = RepoPicker {
                 backend: id,
                 generation,
-                host: claude_commander_protocol::hosting::CodeHost {
-                    provider: host.provider,
-                    hostname: host.hostname,
-                },
+                host: host.host(),
                 ..Default::default()
             };
             if matches!(
@@ -2762,6 +2820,16 @@ impl App {
         };
         find_in(self.view_for(backend))
             .or_else(|| self.backends.iter().find_map(|h| find_in(&h.view)))
+    }
+
+    /// Attach-loop recovery must preserve deferred program changes on every backend.
+    async fn recover_ended_session(
+        &self,
+        session: SessionRef,
+    ) -> claude_commander_core::backend::BResult<()> {
+        self.backend_arc(session.backend)
+            .recover_session_fresh(session.id)
+            .await
     }
 
     /// Open an attach connection for `target`: through the owning backend for a
@@ -2980,15 +3048,15 @@ impl App {
             // Clear unread for everything we actually saw — the
             // operator watched those turns finish.
             let backend = self.backend_arc(attached_backend);
-            for id in &viewed_ids {
-                let _ = backend.mark_read(*id).await;
-            }
             if let Some(handle) = self.backends.iter_mut().find(|h| h.id == attached_backend) {
                 let sequence = handle.refresh_sequence.clone();
                 let tx = self.event_loop.sender();
                 // Keep the fresh service read: it advances the shared unread
                 // baseline too. Only its wait moves off the first-frame path.
                 let task = tokio::spawn(async move {
+                    for id in &viewed_ids {
+                        let _ = backend.mark_read(*id).await;
+                    }
                     match backend.agent_states(true).await {
                         Ok(fresh) => {
                             let states = fresh
@@ -3017,6 +3085,19 @@ impl App {
                 handle.feed_tasks.push(task);
             }
             self.refresh_list_items().await;
+        }
+    }
+
+    /// Run startup program discovery and refresh the cached config with what
+    /// it added. The refresh is not optional: the write records the file's new
+    /// mtime, so the hot-reload never fires for it, and without it the picker
+    /// would not offer the new entries — and the next settings save, which
+    /// writes this cached copy back whole, would delete them from disk.
+    fn discover_programs_on(&mut self, path: &std::ffi::OsStr) {
+        match self.service.discover_programs_on(path) {
+            Ok(added) if !added.is_empty() => self.config = self.service.read_config(),
+            Ok(_) => {}
+            Err(e) => warn!("Program discovery failed: {e}"),
         }
     }
 
@@ -3109,6 +3190,11 @@ impl App {
                 .spawn_background_tasks(claude_commander_core::api::BackgroundOpts {
                     commander_enabled: self.commander_enabled_at_init,
                 });
+
+        // List any recognised agent harness installed on this host that the
+        // program picker doesn't offer yet. A remote backend's server does the
+        // same against its own host.
+        self.discover_programs_on(&std::env::var_os("PATH").unwrap_or_default());
 
         // Restore the last-selected view (before the first list build so the
         // correct structure — list vs board — is populated up front). If the
@@ -3449,11 +3535,7 @@ impl App {
                                         (auto, &current)
                                     {
                                         consecutive_ends += 1;
-                                        match self
-                                            .backend_arc(session.backend)
-                                            .restart_session_fresh(session.id)
-                                            .await
-                                        {
+                                        match self.recover_ended_session(*session).await {
                                             Ok(()) => {
                                                 info!(
                                                     "Auto-restarted session fresh (attempt {consecutive_ends})"
