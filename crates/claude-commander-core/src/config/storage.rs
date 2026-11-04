@@ -116,6 +116,26 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The state as clients can observe it: everything persisted except
+    /// bookkeeping no client reads — currently only each session's
+    /// `pr_checked_at`, which every successful PR poll advances.
+    /// [`StateStore`](super::store::StateStore) wakes its change-feed only when
+    /// this view changes, so a poll that found nothing new still persists its
+    /// stamp (the cross-process race guard reads it from disk) without waking
+    /// every client.
+    ///
+    /// A `serde_json::Value` rather than serialised bytes because it is
+    /// compared across *different* `AppState` instances (the cache against a
+    /// fresh read of disk), whose `HashMap`s need not iterate in the same
+    /// order; `Value`'s map equality ignores order.
+    pub(crate) fn client_visible(&self) -> serde_json::Result<serde_json::Value> {
+        let mut visible = self.clone();
+        for session in visible.sessions.values_mut() {
+            session.pr_checked_at = None;
+        }
+        serde_json::to_value(&visible)
+    }
+
     /// Create a new empty state
     pub fn new() -> Self {
         Self {
@@ -210,8 +230,18 @@ impl AppState {
         state.version = env!("CARGO_PKG_VERSION").to_string();
         state.state_path = Some(path.clone());
         state.backfill_base_branch();
+        state.mark_cached_approvals_stale();
 
         Ok(state)
+    }
+
+    /// A startup snapshot cannot establish that saved approval counts are fresh.
+    pub(crate) fn mark_cached_approvals_stale(&mut self) {
+        for session in self.sessions.values_mut() {
+            if let Some(summary) = &mut session.approval_summary {
+                summary.stale = true;
+            }
+        }
     }
 
     /// Populate [`WorktreeSession::base_branch`] for sessions persisted before
@@ -395,10 +425,13 @@ impl AppState {
         // Refuse a settled PR. The load-bearing reason is in this repo and does
         // not depend on GitHub's behaviour: `check_pr_for_branch` polls with
         // `--state all`, so a merged/closed PR still returns `Found`, and
-        // `apply_pr_results` (api.rs) unconditionally re-asserts its
-        // `base_ref_name` over `pr_base_branch` — which outranks the local hint
-        // in both `resolve_stack_parent` and `ReviewBase::of`. So any change we
-        // made here would be undone at the next poll.
+        // every accepted PR check (`apply_pr_results_at_epoch`, api.rs)
+        // re-asserts its `base_ref_name` over `pr_base_branch` — which
+        // outranks the local hint in both `resolve_stack_parent` and
+        // `ReviewBase::of`. Only a failed fetch, a stale-provider sweep or a
+        // check that lost a race to a newer one is skipped, and the next
+        // accepted check re-asserts the field. So any change we made here
+        // would be undone at the next poll.
         // `gh pr edit --base` is also expected to fail on a merged PR, which
         // would leave nothing durable behind; that half is untested here.
         if let Some(state) = session.pr_state {

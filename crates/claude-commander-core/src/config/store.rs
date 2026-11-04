@@ -6,6 +6,7 @@
 //! - An in-memory cache for fast reads on the render path
 //! - Periodic reload to pick up changes from other instances
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,9 @@ use std::time::SystemTime;
 use nix::fcntl::{Flock, FlockArg};
 use tokio::sync::{RwLock, watch};
 use tracing::debug;
+
+use claude_commander_protocol::approval::ApprovalSummary;
+use claude_commander_protocol::session::SessionId;
 
 use super::Config;
 use super::storage::AppState;
@@ -32,8 +36,18 @@ pub struct StateStore {
     lock_path: PathBuf,
     /// In-memory cached state for fast reads
     state: Arc<RwLock<AppState>>,
+    /// Observations present in the supplied startup snapshot stay stale across
+    /// disk reads until a host query replaces them. Clones share this snapshot;
+    /// newer observations retain their persisted freshness, including failures
+    /// recorded by another process.
+    initial_approvals: Arc<BTreeMap<SessionId, ApprovalSummary>>,
     /// Modification time of the state file at last read/write (for change detection)
     last_mtime: Arc<RwLock<Option<SystemTime>>>,
+    /// [`AppState::client_visible`] of the cached `state`, kept beside it so
+    /// [`Self::install`] compares against it instead of re-serialising the
+    /// cache under its write lock. `None` = not known yet (computed on demand);
+    /// only ever touched while holding `state`'s write lock.
+    visible: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     /// Monotonic change counter, bumped after every successful mutation (and on
     /// a reload that picked up an external change). Consumers subscribe via
     /// [`Self::subscribe`] and re-read state on each bump — this is the local
@@ -44,7 +58,8 @@ pub struct StateStore {
 
 impl StateStore {
     /// Create a new StateStore from an already-loaded AppState.
-    pub fn new(app_state: AppState) -> Result<Self> {
+    pub fn new(mut app_state: AppState) -> Result<Self> {
+        let initial_approvals = startup_approval_observations(&mut app_state);
         let state_path = Config::state_file_path()?;
         let lock_path = state_path.with_extension("json.lock");
 
@@ -63,19 +78,25 @@ impl StateStore {
             state_path,
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
+            initial_approvals,
             last_mtime: Arc::new(RwLock::new(mtime)),
+            visible: Arc::default(),
             generation: Arc::new(watch::Sender::new(0)),
         })
     }
 
-    /// Create a StateStore with a custom path (for testing).
-    pub fn with_path(app_state: AppState, state_path: PathBuf) -> Self {
+    /// Create a StateStore with a custom path (for testing). The supplied state
+    /// is its startup snapshot; this constructor does not load the file.
+    pub fn with_path(mut app_state: AppState, state_path: PathBuf) -> Self {
+        let initial_approvals = startup_approval_observations(&mut app_state);
         let lock_path = state_path.with_extension("json.lock");
         Self {
             state_path,
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
+            initial_approvals,
             last_mtime: Arc::new(RwLock::new(None)),
+            visible: Arc::default(),
             generation: Arc::new(watch::Sender::new(0)),
         }
     }
@@ -96,7 +117,10 @@ impl StateStore {
         self.generation.subscribe()
     }
 
-    /// The current change generation. Bumped on every persisted mutation.
+    /// The current change generation. Bumped on every persisted mutation, on a
+    /// reload that picked up an external `state.json` change, and on every
+    /// [`notify_change`](Self::notify_change) — which includes every committed
+    /// config change, since `config.toml` is a separate store.
     pub fn generation(&self) -> u64 {
         *self.generation.borrow()
     }
@@ -106,12 +130,15 @@ impl StateStore {
         self.generation.send_modify(|g| *g += 1);
     }
 
-    /// Wake the change-feed without mutating persisted state. Used by
-    /// service-owned background loops (agent-state polling, project pulls) to
-    /// signal that *observable* state changed — e.g. an agent flipped
-    /// Working↔Idle, or a project-pull outcome updated — even though nothing in
-    /// `state.json` was written. Consumers re-read the relevant snapshot on the
-    /// bump, exactly as they do after a real mutation.
+    /// Wake the change-feed without mutating persisted state. Used to signal
+    /// that *observable* state changed even though nothing in `state.json` was
+    /// written: by service-owned background loops (agent-state polling,
+    /// project pulls) when e.g. an agent flipped Working↔Idle or a
+    /// project-pull outcome updated; by clone jobs as they progress; and by
+    /// the config-change listener `CommanderService::new` registers on its
+    /// `ConfigStore`, so a committed config edit or a hot-reloaded hand edit
+    /// wakes clients. Consumers re-read the relevant snapshot on the bump,
+    /// exactly as they do after a real mutation.
     pub fn notify_change(&self) {
         self.bump_generation();
     }
@@ -167,7 +194,7 @@ impl StateStore {
             )))
         })?;
 
-        let mut disk_state = read_state_from_disk(&self.state_path)?;
+        let mut disk_state = read_state_from_disk(&self.state_path, &self.initial_approvals)?;
         if disk_state.set_install_id_if_absent(candidate) {
             disk_state.version = env!("CARGO_PKG_VERSION").to_string();
             atomic_write(&self.state_path, &disk_state)?;
@@ -183,6 +210,8 @@ impl StateStore {
         // fine to skip.
         if let Ok(mut guard) = self.state.try_write() {
             guard.install_id = Some(effective.clone());
+            // The cached view no longer matches; recompute it on next install.
+            *lock_visible(&self.visible) = None;
         }
         Ok(effective)
         // _lock dropped here → flock released
@@ -192,58 +221,16 @@ impl StateStore {
     ///
     /// Acquires an exclusive file lock, re-reads the current state from disk
     /// (to pick up changes from other instances), applies the closure, writes
-    /// back atomically, and updates the in-memory cache.
+    /// back atomically if anything changed, and updates the in-memory cache.
+    /// The change-feed is woken only when the *client-visible* state changed
+    /// ([`AppState::client_visible`]) — a write that only advances bookkeeping
+    /// such as `pr_checked_at` persists silently.
     pub async fn mutate<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut AppState) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let state_path = self.state_path.clone();
-        let lock_path = self.lock_path.clone();
-
-        // Run the entire lock-read-modify-write cycle on a blocking thread
-        // because flock() is a blocking syscall
-        let (result, new_state, mtime, changed) = tokio::task::spawn_blocking(move || {
-            let lock_file = open_lock_file(&lock_path)?;
-            let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
-                crate::error::Error::Config(ConfigError::SaveFailed(format!(
-                    "Failed to acquire file lock: {}",
-                    e
-                )))
-            })?;
-
-            let mut disk_state = read_state_from_disk(&state_path)?;
-            let before = serde_json::to_vec(&disk_state)
-                .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
-            let result = f(&mut disk_state);
-            disk_state.version = env!("CARGO_PKG_VERSION").to_string();
-            let changed = !state_path.exists()
-                || before
-                    != serde_json::to_vec(&disk_state)
-                        .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
-            if changed {
-                atomic_write(&state_path, &disk_state)?;
-            }
-
-            let mtime = std::fs::metadata(&state_path)
-                .and_then(|m| m.modified())
-                .ok();
-
-            // _lock dropped here → flock released
-            Ok::<_, crate::error::Error>((result, disk_state, mtime, changed))
-        })
-        .await
-        .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
-
-        // Update in-memory cache
-        *self.state.write().await = new_state;
-        let external_change = *self.last_mtime.read().await != mtime;
-        *self.last_mtime.write().await = mtime;
-        if changed || external_change {
-            self.bump_generation();
-        }
-
-        Ok(result)
+        self.try_mutate(move |state| Ok(f(state))).await
     }
 
     /// Apply a fallible mutation to the persisted state.
@@ -257,8 +244,11 @@ impl StateStore {
     {
         let state_path = self.state_path.clone();
         let lock_path = self.lock_path.clone();
+        let initial_approvals = self.initial_approvals.clone();
 
-        let (result, new_state, mtime, changed) =
+        // Run the entire lock-read-modify-write cycle on a blocking thread
+        // because flock() is a blocking syscall
+        let (result, loaded, created) =
             tokio::task::spawn_blocking(move || -> std::result::Result<_, crate::error::Error> {
                 let lock_file = open_lock_file(&lock_path)?;
                 let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
@@ -268,35 +258,28 @@ impl StateStore {
                     )))
                 })?;
 
-                let mut disk_state = read_state_from_disk(&state_path)?;
+                let mut disk_state = read_state_from_disk(&state_path, &initial_approvals)?;
 
                 // Apply the closure — if it fails, bail without writing
-                let before = serde_json::to_vec(&disk_state)
-                    .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+                let before = serde_json::to_vec(&disk_state).map_err(save_failed)?;
                 let result = f(&mut disk_state)?;
 
                 disk_state.version = env!("CARGO_PKG_VERSION").to_string();
-                let changed = !state_path.exists()
-                    || before
-                        != serde_json::to_vec(&disk_state)
-                            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
-                if changed {
+                let created = !state_path.exists();
+                if created || before != serde_json::to_vec(&disk_state).map_err(save_failed)? {
                     atomic_write(&state_path, &disk_state)?;
                 }
 
-                let mtime = std::fs::metadata(&state_path)
-                    .and_then(|m| m.modified())
-                    .ok();
-
-                Ok((result, disk_state, mtime, changed))
+                let loaded = Loaded::new(disk_state, &state_path).map_err(save_failed)?;
+                // _lock dropped here → flock released
+                Ok((result, loaded, created))
             })
             .await
             .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
 
-        *self.state.write().await = new_state;
-        let external_change = *self.last_mtime.read().await != mtime;
-        *self.last_mtime.write().await = mtime;
-        if changed || external_change {
+        // Creating the file is itself news to subscribers, even if the state
+        // in it matches the cache.
+        if self.install(loaded).await.map_err(save_failed)? || created {
             self.bump_generation();
         }
 
@@ -305,7 +288,10 @@ impl StateStore {
 
     /// Check if the on-disk state has changed and reload if so.
     ///
-    /// Returns `true` if the in-memory state was updated.
+    /// Any change on disk replaces the in-memory cache, but the change-feed is
+    /// woken — and `true` returned — only when the client-visible state changed
+    /// ([`AppState::client_visible`]). So another instance's write that only
+    /// advanced `pr_checked_at` is absorbed silently.
     pub async fn reload_if_changed(&self) -> Result<bool> {
         let current_mtime = tokio::fs::metadata(&self.state_path)
             .await
@@ -322,8 +308,9 @@ impl StateStore {
 
         let state_path = self.state_path.clone();
         let lock_path = self.lock_path.clone();
+        let initial_approvals = self.initial_approvals.clone();
 
-        let (new_state, mtime) = tokio::task::spawn_blocking(move || {
+        let loaded = tokio::task::spawn_blocking(move || {
             let lock_file = open_lock_file(&lock_path)?;
             let _lock = Flock::lock(lock_file, FlockArg::LockShared).map_err(|(_, e)| {
                 crate::error::Error::Config(ConfigError::LoadFailed(format!(
@@ -332,25 +319,81 @@ impl StateStore {
                 )))
             })?;
 
-            let state = read_state_from_disk(&state_path)?;
-
-            let mtime = std::fs::metadata(&state_path)
-                .and_then(|m| m.modified())
-                .ok();
-
-            Ok::<_, crate::error::Error>((state, mtime))
+            let state = read_state_from_disk(&state_path, &initial_approvals)?;
+            Ok::<_, crate::error::Error>(Loaded::new(state, &state_path).map_err(load_failed)?)
         })
         .await
         .map_err(|e| ConfigError::LoadFailed(format!("Blocking task panicked: {}", e)))??;
 
-        *self.state.write().await = new_state;
-        *self.last_mtime.write().await = mtime;
         // An external change was picked up — wake change-feed subscribers so the
         // TUI re-renders on another instance's mutation, not just our own.
-        self.bump_generation();
-
-        Ok(true)
+        let visible_change = self.install(loaded).await.map_err(load_failed)?;
+        if visible_change {
+            self.bump_generation();
+        }
+        Ok(visible_change)
     }
+
+    /// Replace the in-memory cache with state just read from (or written to)
+    /// disk, returning whether its client-visible view differs from what the
+    /// cache held. The comparison runs under the cache's write lock, against
+    /// the value actually being replaced, so a concurrent install cannot make
+    /// it compare against a stale view and miss a change. The cache's own view
+    /// is the one stored by the previous install, so nothing is serialised
+    /// under the lock except on the first install.
+    async fn install(&self, loaded: Loaded) -> serde_json::Result<bool> {
+        let changed = {
+            let mut cache = self.state.write().await;
+            let mut visible = lock_visible(&self.visible);
+            let changed = match visible.as_ref() {
+                Some(current) => *current != loaded.visible,
+                None => cache.client_visible()? != loaded.visible,
+            };
+            *cache = loaded.state;
+            *visible = Some(loaded.visible);
+            changed
+        };
+        *self.last_mtime.write().await = loaded.mtime;
+        Ok(changed)
+    }
+}
+
+/// State read from disk under the file lock, with what [`StateStore::install`]
+/// needs to swap it into the cache. The client-visible view is computed here,
+/// on the blocking thread, rather than while holding the cache's write lock.
+struct Loaded {
+    state: AppState,
+    visible: serde_json::Value,
+    mtime: Option<SystemTime>,
+}
+
+impl Loaded {
+    fn new(state: AppState, state_path: &Path) -> serde_json::Result<Self> {
+        Ok(Self {
+            visible: state.client_visible()?,
+            mtime: std::fs::metadata(state_path)
+                .and_then(|m| m.modified())
+                .ok(),
+            state,
+        })
+    }
+}
+
+fn lock_visible(
+    visible: &std::sync::Mutex<Option<serde_json::Value>>,
+) -> std::sync::MutexGuard<'_, Option<serde_json::Value>> {
+    // A poisoned view is only a cache: recover it rather than propagate.
+    visible
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn save_failed(e: serde_json::Error) -> ConfigError {
+    ConfigError::SaveFailed(e.to_string())
+}
+
+fn load_failed(e: serde_json::Error) -> ConfigError {
+    ConfigError::LoadFailed(e.to_string())
 }
 
 /// Open (or create) the lock file.
@@ -364,6 +407,24 @@ pub fn open_lock_file(lock_path: &Path) -> Result<File> {
         .map_err(|e| ConfigError::SaveFailed(format!("Failed to open lock file: {}", e)).into())
 }
 
+fn startup_approval_observations(
+    state: &mut AppState,
+) -> Arc<BTreeMap<SessionId, ApprovalSummary>> {
+    state.mark_cached_approvals_stale();
+    Arc::new(
+        state
+            .sessions
+            .iter()
+            .filter_map(|(id, session)| {
+                session
+                    .approval_summary
+                    .clone()
+                    .map(|summary| (*id, summary))
+            })
+            .collect(),
+    )
+}
+
 /// Read state from disk, returning a fresh default if the file doesn't exist.
 ///
 /// Applies the same migrations as [`AppState::load_from`] — notably
@@ -372,7 +433,10 @@ pub fn open_lock_file(lock_path: &Path) -> Result<File> {
 /// the in-memory cache with the result. Without the backfill, the first mutation
 /// after startup would strip the derived `base_branch` (which isn't persisted on
 /// older records), reverting the review diff to the stale frozen `base_commit`.
-fn read_state_from_disk(state_path: &PathBuf) -> Result<AppState> {
+fn read_state_from_disk(
+    state_path: &PathBuf,
+    initial_approvals: &BTreeMap<SessionId, ApprovalSummary>,
+) -> Result<AppState> {
     if !state_path.exists() {
         return Ok(AppState::new());
     }
@@ -384,7 +448,19 @@ fn read_state_from_disk(state_path: &PathBuf) -> Result<AppState> {
         .map_err(|e| ConfigError::LoadFailed(format!("Failed to parse state file: {}", e)))?;
 
     state.backfill_base_branch();
-
+    for (id, initial) in initial_approvals {
+        if let Some(summary) = state
+            .sessions
+            .get_mut(id)
+            .and_then(|session| session.approval_summary.as_mut())
+        {
+            let stored_stale = summary.stale;
+            summary.stale = true;
+            if summary != initial {
+                summary.stale = stored_stale;
+            }
+        }
+    }
     Ok(state)
 }
 
@@ -428,7 +504,9 @@ impl Clone for StateStore {
             state_path: self.state_path.clone(),
             lock_path: self.lock_path.clone(),
             state: self.state.clone(),
+            initial_approvals: self.initial_approvals.clone(),
             last_mtime: self.last_mtime.clone(),
+            visible: self.visible.clone(),
             generation: self.generation.clone(),
         }
     }
@@ -690,6 +768,82 @@ mod tests {
         atomic_write(&state_path, &external).unwrap();
         assert!(store.reload_if_changed().await.unwrap());
         assert_eq!(store.generation(), gen_after_seed + 1);
+    }
+
+    /// `pr_checked_at` is persisted but not client-visible. A write that changes
+    /// only it reaches disk (and every instance's cache) without waking the
+    /// change-feed — in the writing instance *or* in another one that picks it
+    /// up through `reload_if_changed` (the state-sync loop's path) or through
+    /// its own next `mutate`.
+    #[tokio::test]
+    async fn stamp_only_writes_persist_without_waking_any_instance() {
+        use crate::session::WorktreeSession;
+
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let writer = StateStore::with_path(AppState::new(), state_path.clone());
+        let reader = StateStore::with_path(AppState::new(), state_path.clone());
+
+        let session = WorktreeSession::new(
+            crate::session::ProjectId::new(),
+            "S",
+            "feature",
+            PathBuf::from("/tmp/p/wt"),
+            "claude",
+        );
+        let sid = session.id;
+        writer
+            .mutate(move |s| s.add_session(session))
+            .await
+            .unwrap();
+        assert!(
+            reader.reload_if_changed().await.unwrap(),
+            "a visible change"
+        );
+        let (writer_gen, reader_gen) = (writer.generation(), reader.generation());
+
+        let stamp = chrono::Utc::now();
+        writer
+            .mutate(move |s| s.get_session_mut(&sid).unwrap().pr_checked_at = Some(stamp))
+            .await
+            .unwrap();
+        let on_disk = AppState::load_from(&state_path).unwrap();
+        assert_eq!(
+            on_disk.get_session(&sid).unwrap().pr_checked_at,
+            Some(stamp)
+        );
+        assert_eq!(
+            writer.generation(),
+            writer_gen,
+            "the writer woke its clients"
+        );
+
+        assert!(!reader.reload_if_changed().await.unwrap());
+        assert_eq!(
+            reader.generation(),
+            reader_gen,
+            "the reader woke its clients"
+        );
+        assert_eq!(
+            reader.read().await.get_session(&sid).unwrap().pr_checked_at,
+            Some(stamp),
+            "the reader's cache still picks the stamp up"
+        );
+
+        // An unabsorbed stamp-only external write seen by a later no-op mutate.
+        let later = stamp + chrono::Duration::seconds(1);
+        writer
+            .mutate(move |s| s.get_session_mut(&sid).unwrap().pr_checked_at = Some(later))
+            .await
+            .unwrap();
+        reader.mutate(|_| {}).await.unwrap();
+        assert_eq!(reader.generation(), reader_gen);
+
+        // A visible change still wakes both.
+        writer.mutate(|s| s.seen_help = true).await.unwrap();
+        assert_eq!(writer.generation(), writer_gen + 1);
+        assert!(reader.reload_if_changed().await.unwrap());
+        assert_eq!(reader.generation(), reader_gen + 1);
     }
 
     #[tokio::test]
