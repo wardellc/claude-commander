@@ -72,6 +72,17 @@ impl ApiError {
             | CoreError::Session(SessionError::TmuxSessionNotFound(_))
             | CoreError::Session(SessionError::FileNotInDiff(_)) => StatusCode::NOT_FOUND,
 
+            // A review-diff selection naming a file that isn't there is a 404;
+            // one whose only problem is a stale `@hash` is a conflict with the
+            // file's current content (409).
+            CoreError::Session(SessionError::FileSelectionRejected { missing, .. }) => {
+                if missing.is_empty() {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::NOT_FOUND
+                }
+            }
+
             // Conflicting existing state → 409.
             CoreError::Session(SessionError::AlreadyExists(_))
             | CoreError::Session(SessionError::InvalidState(_))
@@ -116,7 +127,7 @@ impl ApiError {
             CoreError::Tmux(TmuxError::NotInstalled)
             | CoreError::Tmux(TmuxError::ServerNotRunning)
             | CoreError::Git(
-                GitError::CodeHostCliUnavailable { .. } | GitError::RepoListTimedOut { .. },
+                GitError::CodeHostCliUnavailable { .. },
             ) => StatusCode::SERVICE_UNAVAILABLE,
 
             // Everything else (git failures, IO, persistence, cascade, other
@@ -162,6 +173,21 @@ mod tests {
         let err = ApiError(CoreError::Session(SessionError::NotFound(SessionId::new())));
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert_eq!(err.kind(), "session");
+    }
+
+    /// A stale `@hash` alone is a conflict with the file's current content; a
+    /// named file that isn't in the diff at all is a 404 even beside one.
+    #[test]
+    fn file_selection_rejected_is_409_when_only_stale_else_404() {
+        let rejected = |missing: &[&str], changed: &[&str]| {
+            ApiError(CoreError::Session(SessionError::FileSelectionRejected {
+                missing: missing.iter().map(|s| s.to_string()).collect(),
+                changed: changed.iter().map(|s| s.to_string()).collect(),
+            }))
+            .status()
+        };
+        assert_eq!(rejected(&[], &["b.rs"]), StatusCode::CONFLICT);
+        assert_eq!(rejected(&["a.rs"], &["b.rs"]), StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -287,7 +313,7 @@ mod tests {
         );
     }
 
-    /// A repo listing that overran is a 503 carrying its own precise reason.
+    /// A repo listing that overran is a 500 carrying its own precise reason.
     ///
     /// The client maps 503 to `Unavailable`, which frontends word as "install gh
     /// on the server" — actively wrong for a user whose working `gh` just had a
@@ -296,12 +322,12 @@ mod tests {
     /// budget longer than the server's `gh` budget, so the server wins the race
     /// and answers with this instead of the client reporting a transport timeout.
     #[test]
-    fn a_timed_out_repo_listing_is_a_503_with_its_own_reason() {
+    fn a_timed_out_repo_listing_is_a_500_with_its_own_reason() {
         let err = ApiError(CoreError::Git(GitError::RepoListTimedOut {
             provider: claude_commander_protocol::hosting::CodeHostProvider::Github,
             secs: 90,
         }));
-        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(
             err.0.to_string().contains("timed out"),
             "the body must carry the real reason: {}",

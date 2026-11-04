@@ -10,15 +10,14 @@
 //! to mobile targets.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use claude_commander_protocol::api::{
     AddProjectRequest, AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions,
     CreateSessionOpts, CreatedId, DiffSide, MarkUnread, NewComment, OperationStatus, PatchSession,
-    PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedToggle, ScanResponse,
-    SessionDetail, SetProgramsRequest, SetSection, SetSessionBase, SetSessionBaseOutcome, Snapshot,
-    ToggleReviewed,
+    PreviewData, ProgramInfo, RenameSession, ReviewSnapshot, ReviewedFileMark, ReviewedToggle,
+    ScanResponse, SessionDetail, SetProgramsRequest, SetSection, SetSessionBase,
+    SetSessionBaseOutcome, Snapshot, ToggleReviewed,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::github::{CloneJob, CloneJobId, CloneRequest, GithubRepo};
@@ -61,6 +60,7 @@ use crate::spec::{RemoteServerSpec, SecretString};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Overall per-request ceiling (a slow branch-diff still fits comfortably).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const _: () = assert!(REQUEST_TIMEOUT.as_secs() > claude_commander_protocol::CHANGE_WAIT_SECS);
 /// Tighter per-request bound for interactive review reads/writes (list/create/
 /// delete comment, toggle-reviewed): these are quick store/file operations, so
 /// a user who fires one and waits shouldn't sit through the 30s
@@ -100,32 +100,11 @@ const REPO_LIST_TIMEOUT: Duration =
 /// client, the resolved base URL, and the (redacted) bearer token. Cloneable via
 /// `Arc`; the poll task holds an `Arc` of this — never of the adapter backend —
 /// so there's no cycle.
-#[derive(Default)]
-struct SnapshotCache {
-    epoch: u64,
-    fetched_at: Option<std::time::Instant>,
-    workspace: Option<Snapshot>,
-    agents: Option<AgentStatesSnapshot>,
-}
-
-impl SnapshotCache {
-    fn expire(&mut self) {
-        if self
-            .fetched_at
-            .is_some_and(|at| at.elapsed() > Duration::from_secs(2))
-        {
-            self.workspace = None;
-            self.agents = None;
-        }
-    }
-}
-
 pub struct RemoteClient {
     name: String,
     client: Client,
     base: Url,
     token: Option<SecretString>,
-    snapshots: Mutex<SnapshotCache>,
 }
 
 impl RemoteClient {
@@ -161,7 +140,6 @@ impl RemoteClient {
             client,
             base,
             token: spec.token,
-            snapshots: Mutex::new(SnapshotCache::default()),
         })
     }
 
@@ -237,20 +215,10 @@ impl RemoteClient {
             Some(token) => request.bearer_auth(token.expose()),
             None => request,
         };
-        let request = request.build().map_err(error::transport_error)?;
-        let mutation = request.method() != reqwest::Method::GET;
-        if mutation {
-            self.invalidate_snapshots();
-        }
-        let response = self.client.execute(request).await.map_err(|err| {
+        request.send().await.map_err(|err| {
             tracing::debug!(server = %self.name, error = %err, "remote request failed in transport");
             error::transport_error(err)
-        });
-        // A poll started during a mutation may have read the old state.
-        if mutation {
-            self.invalidate_snapshots();
-        }
-        response
+        })
     }
 
     /// Turn a non-success status into the matching [`ClientError`], reading the
@@ -442,37 +410,15 @@ impl RemoteClient {
     /// whether observable state moved. Any HTTP/transport failure propagates so
     /// the poller can go degraded.
     pub async fn poll_hashes(&self) -> ClientResult<u64> {
-        let epoch = self
-            .snapshots
-            .lock()
-            .expect("snapshot cache poisoned")
-            .epoch;
         let (workspace, agent_states) = tokio::try_join!(
             self.get_bytes(self.endpoint(&["workspace"])),
             self.get_bytes(self.endpoint(&["agent-states"])),
         )?;
-        let snapshot =
-            serde_json::from_slice(&workspace).map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let agents = serde_json::from_slice(&agent_states)
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let mut hasher = Xxh3::new();
         hasher.update(&workspace);
         hasher.update(b"\x00");
         hasher.update(&agent_states);
-        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-        if cache.epoch == epoch {
-            cache.fetched_at = Some(std::time::Instant::now());
-            cache.workspace = Some(snapshot);
-            cache.agents = Some(agents);
-        }
         Ok(hasher.digest())
-    }
-
-    fn invalidate_snapshots(&self) {
-        let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-        cache.epoch = cache.epoch.wrapping_add(1);
-        cache.workspace = None;
-        cache.agents = None;
     }
 
     /// Wait for a server generation. A 404 means an older server: the poller
@@ -525,30 +471,10 @@ impl RemoteClient {
     }
 
     pub async fn snapshot(&self) -> ClientResult<Snapshot> {
-        let cached = {
-            let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-            cache.expire();
-            cache.workspace.take()
-        };
-        match cached {
-            Some(snapshot) => Ok(snapshot),
-            None => self.get_json(self.endpoint(&["workspace"])).await,
-        }
+        self.get_json(self.endpoint(&["workspace"])).await
     }
 
     pub async fn agent_states(&self, fresh: bool) -> ClientResult<AgentStatesSnapshot> {
-        if !fresh {
-            let cached = {
-                let mut cache = self.snapshots.lock().expect("snapshot cache poisoned");
-                cache.expire();
-                cache.agents.take()
-            };
-            if let Some(states) = cached {
-                return Ok(states);
-            }
-        } else {
-            self.invalidate_snapshots();
-        }
         let mut url = self.endpoint(&["agent-states"]);
         url.query_pairs_mut()
             .append_pair("fresh", if fresh { "true" } else { "false" });
@@ -661,6 +587,25 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn recover_session_fresh(&self, id: SessionId) -> ClientResult<()> {
+        match self
+            .post_empty_ok(self.session_url(id, &["recover-fresh"]))
+            .await
+        {
+            Err(crate::ClientError::NotFound) => {
+                let detail = self
+                    .session_detail(&id.as_uuid().to_string(), None)
+                    .await?
+                    .ok_or(crate::ClientError::NotFound)?;
+                if detail.info.pending_program.is_some() {
+                    return Err(crate::ClientError::InvalidRequest("Upgrade this server to recover an exited agent without applying its pending program.".into()));
+                }
+                self.restart_session_fresh(id).await
+            }
+            result => result,
+        }
+    }
+
     pub async fn delete_session(&self, id: SessionId) -> ClientResult<()> {
         self.delete_ok(self.session_url(id, &[])).await
     }
@@ -669,9 +614,84 @@ impl RemoteClient {
         &self,
         id: SessionId,
         edit: claude_commander_protocol::api::EditSession,
-    ) -> ClientResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
-        self.patch_json(self.session_url(id, &[]), &PatchSession::Edit(edit))
-            .await
+    ) -> ClientResult<claude_commander_protocol::api::EditSessionOutcome> {
+        let result = self
+            .patch_json(self.session_url(id, &[]), &PatchSession::Edit(edit.clone()))
+            .await;
+        match result {
+            Err(crate::ClientError::InvalidRequest(ref message))
+                if message.contains("unknown variant `edit`") =>
+            {
+                self.edit_session_legacy(id, edit).await
+            }
+            result => result,
+        }
+    }
+
+    async fn edit_session_legacy(
+        &self,
+        id: SessionId,
+        edit: claude_commander_protocol::api::EditSession,
+    ) -> ClientResult<claude_commander_protocol::api::EditSessionOutcome> {
+        // Old servers cannot retain a deferred program. Reject before any writes.
+        if edit.program.is_some() || edit.restart {
+            return Err(crate::ClientError::InvalidRequest("This server needs an upgrade to save program changes through Edit session. No settings were changed.".into()));
+        }
+        let mut outcome = claude_commander_protocol::api::EditSessionOutcome::default();
+        let mut saved = false;
+        let result: ClientResult<()> = async {
+            if let Some(title) = edit.title {
+                self.rename_session(id, title).await?;
+                saved = true;
+            }
+            if let Some(section) = edit.section {
+                self.set_section(id, section).await?;
+                saved = true;
+            }
+            if let Some(base) = edit.base {
+                let base = self.set_session_base(id, base.parent_session_id).await?;
+                if let claude_commander_protocol::api::PrRetarget::Failed { message, .. } = &base.pr
+                {
+                    outcome.warnings.push(format!(
+                        "Session saved, but PR target update failed: {message}"
+                    ));
+                }
+                outcome.base = Some(base);
+                saved = true;
+            }
+            // Old servers only offer a toggle, so read the current value as
+            // late as possible — after the steps above, which can take seconds
+            // — and flip only if it still differs. A change landing between
+            // this read and the toggle is still inverted; the toggle's answer
+            // exposes that, and it is reported rather than toggled back (which
+            // could race the same way).
+            if let Some(value) = edit.keep_alive {
+                let current = self
+                    .session_detail(&id.as_uuid().to_string(), None)
+                    .await?
+                    .ok_or(crate::ClientError::NotFound)?
+                    .info
+                    .keep_alive;
+                if current != value {
+                    let now = self.toggle_keep_alive(id).await?;
+                    saved = true;
+                    if now != value {
+                        outcome.warnings.push(
+                            "Keep alive was changed on the server during this edit, so it no longer matches what you chose. Refresh and set it again.".into(),
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if !saved {
+                return Err(error);
+            }
+            outcome.warnings.push(format!("Some settings were saved, but this older server could not complete the edit: {error}. Refresh and check the remaining settings."));
+        }
+        Ok(outcome)
     }
 
     pub async fn rename_session(&self, id: SessionId, title: String) -> ClientResult<()> {
@@ -1007,12 +1027,18 @@ impl RemoteClient {
         .await
     }
 
-    pub async fn toggle_file_reviewed(
+    /// Set or clear a file's reviewed mark (never a toggle), returning the new
+    /// state. See [`ToggleReviewed::reviewed`] for why a view says which way.
+    pub async fn set_file_reviewed(
         &self,
         id: SessionId,
         display_path: String,
+        reviewed: bool,
     ) -> ClientResult<bool> {
-        let body = ToggleReviewed { display_path };
+        let body = ToggleReviewed {
+            display_path,
+            reviewed: Some(reviewed),
+        };
         let out: ReviewedToggle = self
             .post_json_within(
                 self.session_url(id, &["files", "reviewed"]),
@@ -1021,6 +1047,16 @@ impl RemoteClient {
             )
             .await?;
         Ok(out.reviewed)
+    }
+
+    /// The session's stored reviewed marks (unpruned), for an open review view
+    /// to poll. Bounded like the other review store reads.
+    pub async fn reviewed_marks(&self, id: SessionId) -> ClientResult<Vec<ReviewedFileMark>> {
+        self.get_json_within(
+            self.session_url(id, &["files", "reviewed"]),
+            REVIEW_WRITE_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn fetch_diff_blob(
@@ -1074,35 +1110,14 @@ fn diff_side_param(side: DiffSide) -> &'static str {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn delayed_explicit_refresh_does_not_consume_an_old_poll() {
+    async fn explicit_reads_bypass_recent_poll_payloads() {
         use std::sync::atomic::Ordering;
         let server = crate::test_server::Server::start(true).await;
         server.client.poll_hashes().await.unwrap();
-        server.client.snapshots.lock().unwrap().fetched_at =
-            Some(std::time::Instant::now() - Duration::from_secs(3));
-        server.client.snapshot().await.unwrap();
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn polled_payloads_are_reused_once_and_invalidated_by_mutations() {
-        use std::sync::atomic::Ordering;
-        let server = crate::test_server::Server::start(true).await;
-        server.client.poll_hashes().await.unwrap();
-        server.client.snapshot().await.unwrap();
-        server.client.agent_states(false).await.unwrap();
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 1);
-        assert_eq!(server.data.agents.load(Ordering::SeqCst), 1);
         server.client.snapshot().await.unwrap();
         server.client.agent_states(false).await.unwrap();
         assert_eq!(server.data.workspace.load(Ordering::SeqCst), 2);
         assert_eq!(server.data.agents.load(Ordering::SeqCst), 2);
-        server.client.poll_hashes().await.unwrap();
-        server.client.request_pr_refresh().await.unwrap();
-        server.client.snapshot().await.unwrap();
-        server.client.agent_states(false).await.unwrap();
-        assert_eq!(server.data.workspace.load(Ordering::SeqCst), 4);
-        assert_eq!(server.data.agents.load(Ordering::SeqCst), 4);
     }
 
     use super::*;
@@ -1425,5 +1440,207 @@ mod tests {
             matches!(err, ClientError::Unavailable { .. }),
             "a valid image must reach the transport, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_edit_tests {
+    use super::*;
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::patch};
+    use serde::Deserialize;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case")]
+    enum LegacyPatch {
+        Rename { title: String },
+        SetSection { section: Option<String> },
+    }
+
+    /// A `/detail` body as a server without `edit` serves it.
+    fn legacy_detail_json(sid: SessionId, pending: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "id":sid.as_uuid().to_string(), "session_id":sid, "title":"task", "branch":"task", "status":"running",
+            "program":"claude", "pending_program":pending, "project_id":claude_commander_protocol::session::ProjectId::new(),
+            "project_name":"repo", "pr_number":null, "pr_url":null, "pr_state":"open", "pr_draft":false,
+            "pr_labels":[], "review_decision":null, "pr_reviewers":[], "created_at":"2026-01-01T00:00:00Z",
+            "agent_state":"idle", "diff_stat":null, "pane_content":null
+        })
+    }
+
+    #[tokio::test]
+    async fn legacy_edit_fallback_is_narrow_and_reports_partial_saves() {
+        for (unsupported, program, section_failure) in [
+            (true, false, false),
+            (true, true, false),
+            (false, false, false),
+            (true, false, true),
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let counter = attempts.clone();
+            let app = if unsupported {
+                Router::new().route("/api/sessions/{id}", patch(move |State(calls): State<Arc<Mutex<Vec<String>>>>, Json(body): Json<LegacyPatch>| async move {
+                    let op = match body {
+                        LegacyPatch::Rename { title } => { assert_eq!(title, "renamed"); "rename" },
+                        LegacyPatch::SetSection { section } => { assert_eq!(section.as_deref(), Some("Review")); "set_section" },
+                    };
+                    calls.lock().unwrap().push(op.into());
+                    if section_failure && op == "set_section" {
+                        (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error":{"kind":"bad_request","message":"validation failed"}})))
+                    } else { (StatusCode::NO_CONTENT, Json(serde_json::Value::Null)) }
+                }))
+            } else {
+                Router::new().route("/api/sessions/{id}", patch(|| async {
+                    (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error":{"kind":"bad_request","message":"validation failed"}})))
+                }))
+            }.with_state(calls.clone()).layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async move { next.run(request).await }
+            }));
+            let served = crate::test_server::serve(app).await;
+            let (client, addr) = (&served.client, served.addr);
+            let edit = claude_commander_protocol::api::EditSession {
+                title: Some("renamed".into()),
+                program: program.then(|| "codex".into()),
+                section: section_failure.then(|| Some("Review".into())),
+                ..Default::default()
+            };
+            if unsupported {
+                let raw = reqwest::Client::new()
+                    .patch(format!("http://{addr}/api/sessions/test"))
+                    .json(&serde_json::json!({"op":"edit"}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                assert!(raw.starts_with("Failed to deserialize the JSON body into the target type: op: unknown variant `edit`"), "legacy extractor response: {raw}");
+                attempts.store(0, Ordering::SeqCst);
+            }
+            let result = client.edit_session(SessionId::new(), edit).await;
+            if !unsupported || program {
+                assert!(result.is_err());
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+                assert!(calls.lock().unwrap().is_empty());
+            } else {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.warnings.is_empty(), !section_failure);
+                assert_eq!(calls.lock().unwrap()[0], "rename");
+                assert_eq!(
+                    attempts.load(Ordering::SeqCst),
+                    if section_failure { 3 } else { 2 }
+                );
+                if section_failure {
+                    assert_eq!(calls.lock().unwrap()[1], "set_section");
+                }
+            }
+        }
+    }
+    /// An old server only offers a keep-alive *toggle*, so the fallback must
+    /// read the current value as late as possible and report a toggle that
+    /// landed on the wrong value rather than claim success.
+    #[tokio::test]
+    async fn legacy_edit_keep_alive_reads_late_and_reports_a_lost_race() {
+        use axum::routing::{get, post};
+        // `flip_on_rename`: a concurrent change lands while the rename is in
+        // flight. `flip_after_read`: one lands between the read and the toggle.
+        for (flip_on_rename, flip_after_read) in [(true, false), (false, true)] {
+            let sid = SessionId::new();
+            let keep_alive = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let detail = legacy_detail_json(sid, None);
+            let (on_rename, on_detail, on_toggle) =
+                (keep_alive.clone(), keep_alive.clone(), keep_alive.clone());
+            let app = Router::new()
+                .route(
+                    "/api/sessions/{id}",
+                    patch(move |Json(body): Json<LegacyPatch>| async move {
+                        assert!(matches!(body, LegacyPatch::Rename { .. }));
+                        if flip_on_rename {
+                            on_rename.fetch_xor(true, Ordering::SeqCst);
+                        }
+                        StatusCode::NO_CONTENT
+                    }),
+                )
+                .route(
+                    "/api/sessions/{id}/detail",
+                    get(move || async move {
+                        let mut detail = detail.clone();
+                        detail["keep_alive"] = on_detail.load(Ordering::SeqCst).into();
+                        if flip_after_read {
+                            on_detail.fetch_xor(true, Ordering::SeqCst);
+                        }
+                        Json(detail)
+                    }),
+                )
+                .route(
+                    "/api/sessions/{id}/keep-alive",
+                    post(move || async move { Json(!on_toggle.fetch_xor(true, Ordering::SeqCst)) }),
+                );
+            let served = crate::test_server::serve(app).await;
+            let client = &served.client;
+            let edit = claude_commander_protocol::api::EditSession {
+                title: Some("renamed".into()),
+                keep_alive: Some(true),
+                ..Default::default()
+            };
+            let outcome = client.edit_session(sid, edit).await.unwrap();
+            if flip_on_rename {
+                // Read after the rename: already true, so no toggle.
+                assert!(keep_alive.load(Ordering::SeqCst));
+                assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+            } else {
+                // The toggle landed on the concurrent value; say so.
+                assert!(!keep_alive.load(Ordering::SeqCst));
+                assert!(
+                    outcome.warnings.iter().any(|w| w.contains("Keep alive")),
+                    "{:?}",
+                    outcome.warnings
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn old_server_recovery_falls_back_only_without_a_pending_program() {
+        use axum::{
+            extract::Path,
+            routing::{get, post},
+        };
+        for pending in [None, Some("codex")] {
+            let sid = SessionId::new();
+            let expected_id = sid.as_uuid().to_string();
+            let resets = Arc::new(AtomicUsize::new(0));
+            let recorded = resets.clone();
+            let detail = legacy_detail_json(sid, pending);
+            let app = Router::new()
+                .route(
+                    "/api/sessions/{id}/detail",
+                    get(move |Path(id): Path<String>| {
+                        assert_eq!(id, expected_id);
+                        let detail = detail.clone();
+                        async move { Json(detail) }
+                    }),
+                )
+                .route(
+                    "/api/sessions/{id}/restart-fresh",
+                    post(move || {
+                        recorded.fetch_add(1, Ordering::SeqCst);
+                        async { StatusCode::NO_CONTENT }
+                    }),
+                );
+            let served = crate::test_server::serve(app).await;
+            let client = &served.client;
+            let result = client.recover_session_fresh(sid).await;
+            assert_eq!(result.is_ok(), pending.is_none());
+            assert_eq!(
+                resets.load(Ordering::SeqCst),
+                usize::from(pending.is_none())
+            );
+        }
     }
 }

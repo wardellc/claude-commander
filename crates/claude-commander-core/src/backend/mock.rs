@@ -22,6 +22,7 @@ use crate::api::{
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::api::ReviewedFileMark;
 use claude_commander_protocol::github::{
     CloneJob, CloneJobId, CloneRequest, CloneStatus, GithubRepo, redact_credentials,
 };
@@ -69,6 +70,7 @@ pub struct MockBackend {
     /// Kept separate from `restarted` so a test can tell a fresh (no-resume)
     /// restart from a resuming one — the whole point of the Reset command.
     reset: Mutex<Vec<SessionId>>,
+    recovered: Mutex<Vec<SessionId>>,
     /// `(session, program)` pairs passed to [`Self::change_program`], for
     /// call-recording asserts.
     program_changes: Mutex<Vec<(SessionId, String)>>,
@@ -91,8 +93,10 @@ pub struct MockBackend {
     created_comments: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::apply_comments`], for routing asserts.
     applied_comments: Mutex<Vec<SessionId>>,
-    /// `(session, display_path)` passed to [`Self::toggle_file_reviewed`].
-    toggled_reviewed: Mutex<Vec<(SessionId, String)>>,
+    /// `(session, display_path, reviewed)` passed to [`Self::set_file_reviewed`].
+    set_reviewed: Mutex<Vec<(SessionId, String, bool)>>,
+    /// Marks served by [`Self::reviewed_marks`], set by [`Self::set_reviewed_marks`].
+    reviewed_marks: Mutex<Vec<ReviewedFileMark>>,
     /// `(session, side, path)` passed to [`Self::fetch_diff_blob`].
     fetched_blobs: Mutex<Vec<(SessionId, DiffSide, String)>>,
     /// Overrides the `open_editor` capability (default `false`, matching a
@@ -160,6 +164,7 @@ impl MockBackend {
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
             reset: Mutex::new(Vec::new()),
+            recovered: Mutex::new(Vec::new()),
             program_changes: Mutex::new(Vec::new()),
             session_edits: Mutex::new(Vec::new()),
             base_changes: Mutex::new(Vec::new()),
@@ -172,7 +177,8 @@ impl MockBackend {
             listed_comments: Mutex::new(Vec::new()),
             created_comments: Mutex::new(Vec::new()),
             applied_comments: Mutex::new(Vec::new()),
-            toggled_reviewed: Mutex::new(Vec::new()),
+            set_reviewed: Mutex::new(Vec::new()),
+            reviewed_marks: Mutex::new(Vec::new()),
             fetched_blobs: Mutex::new(Vec::new()),
             open_editor: Mutex::new(false),
             github_repos: Mutex::new(Vec::new()),
@@ -241,11 +247,12 @@ impl MockBackend {
         self.base_changes.lock().unwrap().clone()
     }
 
-    /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
+    /// Settings patches passed to [`Self::edit_session`], in call order.
     pub fn session_edits(&self) -> Vec<(SessionId, claude_commander_protocol::api::EditSession)> {
         self.session_edits.lock().unwrap().clone()
     }
 
+    /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
     pub fn program_changes(&self) -> Vec<(SessionId, String)> {
         self.program_changes.lock().unwrap().clone()
     }
@@ -258,6 +265,11 @@ impl MockBackend {
     /// Sessions passed to [`Self::restart_session_fresh`], in call order.
     pub fn reset_sessions(&self) -> Vec<SessionId> {
         self.reset.lock().unwrap().clone()
+    }
+
+    /// Sessions automatically recovered without applying pending settings.
+    pub fn recovered_sessions(&self) -> Vec<SessionId> {
+        self.recovered.lock().unwrap().clone()
     }
 
     /// How many times [`Self::request_pr_refresh`] has been called.
@@ -316,9 +328,15 @@ impl MockBackend {
         self.applied_comments.lock().unwrap().clone()
     }
 
-    /// `(session, display_path)` pairs passed to [`Self::toggle_file_reviewed`].
-    pub fn toggled_reviewed_files(&self) -> Vec<(SessionId, String)> {
-        self.toggled_reviewed.lock().unwrap().clone()
+    /// `(session, display_path, reviewed)` passed to [`Self::set_file_reviewed`].
+    pub fn set_reviewed_files(&self) -> Vec<(SessionId, String, bool)> {
+        self.set_reviewed.lock().unwrap().clone()
+    }
+
+    /// Set the marks served by [`Self::reviewed_marks`] (as if stored by
+    /// another frontend).
+    pub fn set_reviewed_marks(&self, marks: Vec<ReviewedFileMark>) {
+        *self.reviewed_marks.lock().unwrap() = marks;
     }
 
     /// `(session, side, path)` tuples passed to [`Self::fetch_diff_blob`].
@@ -528,6 +546,12 @@ impl CommanderBackend for MockBackend {
         Ok(())
     }
 
+    async fn recover_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.recovered.lock().unwrap().push(id);
+        Ok(())
+    }
+
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
         self.guard()?;
         self.deleted.lock().unwrap().push(id);
@@ -538,10 +562,10 @@ impl CommanderBackend for MockBackend {
         &self,
         id: SessionId,
         edit: claude_commander_protocol::api::EditSession,
-    ) -> BResult<Option<claude_commander_protocol::api::SetSessionBaseOutcome>> {
+    ) -> BResult<claude_commander_protocol::api::EditSessionOutcome> {
         self.guard()?;
         self.session_edits.lock().unwrap().push((id, edit));
-        Ok(None)
+        Ok(Default::default())
     }
 
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {
@@ -797,13 +821,23 @@ impl CommanderBackend for MockBackend {
         Ok(ApplyOutcome::Nothing)
     }
 
-    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
+    async fn set_file_reviewed(
+        &self,
+        id: SessionId,
+        display_path: String,
+        reviewed: bool,
+    ) -> BResult<bool> {
         self.guard()?;
-        self.toggled_reviewed
+        self.set_reviewed
             .lock()
             .unwrap()
-            .push((id, display_path));
-        Ok(false)
+            .push((id, display_path, reviewed));
+        Ok(reviewed)
+    }
+
+    async fn reviewed_marks(&self, _id: SessionId) -> BResult<Vec<ReviewedFileMark>> {
+        self.guard()?;
+        Ok(self.reviewed_marks.lock().unwrap().clone())
     }
 
     async fn fetch_diff_blob(

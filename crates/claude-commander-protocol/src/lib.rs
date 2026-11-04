@@ -31,7 +31,9 @@ pub mod github;
 pub mod hosting;
 pub mod paste;
 pub mod pr;
+pub mod preview;
 pub mod session;
+pub mod session_editor;
 pub mod workspace;
 pub mod ws;
 
@@ -41,5 +43,3 @@ mod ts_export;
 /// Maximum duration of an authenticated change request. Clients use their
 /// normal request timeout, which must exceed this server-side wait.
 pub const CHANGE_WAIT_SECS: u64 = 20;
-
-pub mod preview;

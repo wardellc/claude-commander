@@ -928,6 +928,11 @@ button.ghost {
 .rv-line.context .rv-content::before {
   content: " ";
 }
+.rv-chunk {
+  /* Contain comment margins, so a chunk's measured height is all of its
+     space and can stand in for its rows when it is rebuilt unmounted. */
+  display: flow-root;
+}
 .rv-binary {
   padding: 12px;
   color: var(--fg-dim);
@@ -1006,12 +1011,6 @@ button.ghost {
   background: var(--accent);
   border-color: var(--accent);
   color: #04121f;
-}
-
-/* Offscreen files retain estimated space until the browser lays them out. */
-.rv-file {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 500px;
 }
 
 .agent.failed .dot,

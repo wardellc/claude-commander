@@ -1,6 +1,7 @@
 //! Main event loop: tick dispatch, event processing, and config hot-reload.
 
 use super::*;
+use crate::widgets::status_glyph::status_spins;
 
 impl App {
     /// Main event loop
@@ -80,6 +81,12 @@ impl App {
                 // correct behavior when draining multiple events)
                 self.update_selection();
 
+                if self.ui_state.selected_session_id != old_session
+                    || self.ui_state.selected_project_id != old_project
+                {
+                    self.ui_state.pending_selection = None;
+                    self.ui_state.pending_project = None;
+                }
                 // Re-capture immediately when the selection changes, so the
                 // pane doesn't keep showing the previous session until the next
                 // tick.
@@ -118,7 +125,11 @@ impl App {
             }
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
-                let mut dirty = self.drain_dictations();
+                let recording = self.conversation.is_recording();
+                let mut dirty = self.drain_dictations()
+                    || matches!(self.ui_state.modal, Modal::Conversation { .. })
+                    || recording != self.ui_state.last_recording;
+                self.ui_state.last_recording = recording;
                 if self.ui_state.last_animation.elapsed() >= Duration::from_millis(100) {
                     self.ui_state.last_animation = Instant::now();
                     self.ui_state.throbber_state.calc_next();
@@ -128,7 +139,7 @@ impl App {
                                 .snapshot
                                 .sessions
                                 .iter()
-                                .any(|s| s.status == SessionStatus::Creating)
+                                .any(|s| status_spins(s.status))
                                 || h.view.agent_states.states.values().any(|s| s.is_busy())
                         });
                 }
@@ -148,6 +159,9 @@ impl App {
                 if self.ui_state.last_preview_refresh.elapsed() >= preview_interval {
                     self.ui_state.last_preview_refresh = Instant::now();
                     self.spawn_preview_update();
+                }
+                if self.ui_state.tick_count.is_multiple_of(30) {
+                    self.spawn_reviewed_marks_poll(self.ui_state.tick_count / 30);
                 }
                 if self.ui_state.last_ui_maintenance.elapsed() >= Duration::from_secs(1) {
                     self.ui_state.last_ui_maintenance = Instant::now();
@@ -196,16 +210,10 @@ impl App {
         match result {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
-                let old_servers = self.config.remote_servers.clone();
-                self.config = self.service.read_config();
+                // Also reconciles the live backends against a changed
+                // remote-server list.
+                self.sync_config_from_service();
                 self.reload_theme();
-
-                // Reconcile the live backends against the new remote-server list
-                // (add/remove/rebuild handles) when it changed.
-                let new_servers = self.config.remote_servers.clone();
-                if old_servers != new_servers {
-                    self.apply_remote_servers_reload(&old_servers, &new_servers);
-                }
                 true
             }
             Ok(false) => false,

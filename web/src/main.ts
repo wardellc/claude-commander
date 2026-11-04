@@ -171,9 +171,7 @@ async function poll(): Promise<void> {
 // A separate change wait keeps explicit refresh free of the long-poll latency.
 let changesSupported = false;
 function refreshCadence(): void {
-  poller.setIntervalMs(
-    document.hidden ? 60_000 : changesSupported && haltState() !== "gone" ? 30_000 : POLL_MS,
-  );
+  poller.setIntervalMs(changesSupported && haltState() !== "gone" ? 30_000 : POLL_MS);
 }
 async function watchChanges(): Promise<void> {
   let generation: number | undefined;
@@ -186,7 +184,7 @@ async function watchChanges(): Promise<void> {
       const next = await api.changes(generation);
       changesSupported = true;
       refreshCadence();
-      if (generation !== next && !document.hidden) await refreshAll();
+      if (generation !== next) await refreshAll();
       generation = next;
     } catch (error) {
       changesSupported = false;
@@ -250,6 +248,13 @@ function renderToolbar(): void {
 }
 
 async function restartSession(s: SessionInfo): Promise<void> {
+  if (
+    s.pending_program !== null &&
+    !confirm(
+      `Restart "${s.title}" with "${s.pending_program}"? This switches the program and clears the conversation.`,
+    )
+  )
+    return;
   if (!(await act(api.restartSession(s.id)))) return;
   // The old pane's session ended (a final close); attach to the new one.
   if (state.selectedId === s.id) reattach();
