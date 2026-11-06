@@ -150,6 +150,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = service.discover_programs() {
         warn!("program discovery failed: {e}");
     }
+    if let Err(error) = service.scan_configured_directory().await {
+        warn!("repository discovery failed: {error}");
+    }
 
     let server = embed::start(service, &cfg, auth).await?;
     info!("claude-commander-server listening on {}", server.url());

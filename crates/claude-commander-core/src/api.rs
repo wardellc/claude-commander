@@ -649,6 +649,16 @@ impl CommanderService {
         self.manager.scan_directory(dir, tag).await
     }
 
+    /// Discover repositories on startup when a scan root is configured.
+    /// New projects go into Main; existing projects retain their workspace.
+    pub async fn scan_configured_directory(&self) -> Result<Option<ScanResult>> {
+        let root = self.config_store.read().repository_scan_dir.clone();
+        match root {
+            Some(root) => self.manager.scan_directory(&root, None).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     // -- Repository clone --
 
     /// Every GitHub repo the authenticated user can clone, for the repo picker.
@@ -9302,6 +9312,31 @@ printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","stat
         let projects = svc.list_projects().await;
         assert_eq!(projects[0].workspace.as_deref(), Some("Work"));
         assert_eq!(def_names(&svc), ["Work"], "the workspace is defined");
+    }
+
+    #[tokio::test]
+    async fn configured_repository_scan_is_opt_in_and_repeatable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        assert!(svc.scan_configured_directory().await.unwrap().is_none());
+        let root = dir.path().join("repos");
+        let repo = root.join("devops/terraform");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        run_git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+        svc.config_store
+            .mutate(|config| config.repository_scan_dir = Some(root))
+            .unwrap();
+        let result = svc.scan_configured_directory().await.unwrap().unwrap();
+        assert_eq!(result.added, 1);
+        let projects = svc.list_projects().await;
+        assert_eq!(projects[0].name, "devops/terraform");
+        let again = svc.scan_configured_directory().await.unwrap().unwrap();
+        assert_eq!(again.added, 0);
+        assert_eq!(again.skipped, 1);
+        assert_eq!(svc.list_projects().await[0].id, projects[0].id);
     }
 
     /// A clone's `workspace` is checked before anything is cloned: a refused

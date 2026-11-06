@@ -11,6 +11,100 @@ fn test_store() -> (TempDir, Arc<StateStore>) {
     (dir, store)
 }
 
+#[tokio::test]
+async fn directory_scan_names_repositories_relative_to_root() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_sdir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+    let root = TempDir::new().unwrap();
+    for name in ["devops/terraform", "other/terraform", "standalone"] {
+        let repo = root.path().join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git_identity(&repo);
+        git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+    }
+    let existing = manager
+        .add_project(root.path().join("devops/terraform"), Some("Work".into()))
+        .await
+        .unwrap();
+    let result = manager.scan_directory(root.path(), None).await.unwrap();
+    assert_eq!(result.added, 2);
+    assert_eq!(result.skipped, 1);
+    let state = store.read().await;
+    let mut names: Vec<_> = state.projects.values().map(|p| p.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["devops/terraform", "other/terraform", "standalone"]);
+    assert_eq!(state.projects[&existing].workspace.as_deref(), Some("Work"));
+    drop(state);
+    let again = manager.scan_directory(root.path(), None).await.unwrap();
+    assert_eq!(again.added, 0);
+    assert_eq!(again.skipped, 3);
+}
+
+#[tokio::test]
+async fn scanning_repository_itself_keeps_its_directory_name() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_sdir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+    let root = TempDir::new().unwrap();
+    let repo = root.path().join("terraform");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    git_identity(&repo);
+    git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+    manager.scan_directory(&repo, None).await.unwrap();
+    assert_eq!(
+        store.read().await.projects.values().next().unwrap().name,
+        "terraform"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_scan_avoids_symlink_cycles_and_duplicate_roots() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_sdir, store) = test_store();
+    let manager = SessionManager::new(config_store, store, "");
+    let root = TempDir::new().unwrap();
+    let repo = root.path().join("a");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    git_identity(&repo);
+    git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+    std::os::unix::fs::symlink(root.path(), root.path().join("loop")).unwrap();
+    std::os::unix::fs::symlink(&repo, root.path().join("z-alias")).unwrap();
+    let result = manager.scan_directory(root.path(), None).await.unwrap();
+    assert_eq!(result.added, 1);
+    assert_eq!(result.skipped, 0);
+}
+
+#[tokio::test]
+async fn concurrent_directory_scans_register_each_checkout_once() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (sdir, store) = test_store();
+    let other_store = Arc::new(StateStore::with_path(
+        AppState::new(),
+        sdir.path().join("state.json"),
+    ));
+    let manager = SessionManager::new(config_store.clone(), store.clone(), "");
+    let other_manager = SessionManager::new(config_store, other_store, "");
+    let root = TempDir::new().unwrap();
+    let repo = root.path().join("devops/terraform");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    git_identity(&repo);
+    git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+    let (a, b) = tokio::join!(
+        manager.scan_directory(root.path(), None),
+        other_manager.scan_directory(root.path(), None),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.added + b.added, 1);
+    assert_eq!(a.skipped + b.skipped, 1);
+    assert_eq!(store.read().await.projects.len(), 1);
+}
+
 fn test_config_store(mut config: Config) -> (TempDir, Arc<ConfigStore>) {
     let dir = TempDir::new().unwrap();
     // `projects_dir` defaults to the user's REAL `~/Projects`, which the

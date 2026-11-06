@@ -3195,6 +3195,9 @@ impl App {
         // program picker doesn't offer yet. A remote backend's server does the
         // same against its own host.
         self.discover_programs_on(&std::env::var_os("PATH").unwrap_or_default());
+        if let Err(error) = self.service.scan_configured_directory().await {
+            warn!("Repository discovery failed: {error}");
+        }
 
         // Restore the last-selected view (before the first list build so the
         // correct structure — list vs board — is populated up front). If the

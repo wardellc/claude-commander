@@ -834,7 +834,25 @@ impl App {
     }
 
     pub(super) async fn handle_new_session(&mut self) {
-        if let Some((backend, project_id)) = self.ui_state.selected_project_id {
+        let target = self.ui_state.selected_project_id.or_else(|| {
+            let filter = self.workspace_filter();
+            self.backends
+                .iter()
+                .filter(|handle| {
+                    handle.id == LOCAL_BACKEND_ID
+                        || matches!(handle.view.connection, ConnectionState::Connected)
+                })
+                .find_map(|handle| {
+                    handle
+                        .view
+                        .snapshot
+                        .projects
+                        .iter()
+                        .find(|project| filter.admits(project.workspace.as_deref()))
+                        .map(|project| (handle.id, project.id))
+                })
+        });
+        if let Some((backend, project_id)) = target {
             let repo_path = self
                 .view_for(backend)
                 .snapshot

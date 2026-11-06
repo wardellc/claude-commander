@@ -1012,6 +1012,21 @@ impl App {
             Span::raw("  HTTP API served from this process, on that port"),
         ]));
 
+        lines.push(Line::from(""));
+        lines.push(Line::from("Repository visibility:"));
+        lines.push(Line::from(
+            "  Repository Scan Directory enables discovery at startup.",
+        ));
+        lines.push(Line::from(
+            "  Scanned repository names are relative to the scan directory.",
+        ));
+        lines.push(Line::from(
+            "  Settings → General can hide repositories without sessions.",
+        ));
+        lines.push(Line::from(
+            "  New Session's Project field still offers hidden repositories.",
+        ));
+
         // PR badges legend
         lines.push(Line::from(""));
         lines.push(Line::from("PR Badges:"));

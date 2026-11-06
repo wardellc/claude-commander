@@ -122,6 +122,12 @@ ui_refresh_fps = 30
 # worktrees directory this lives under your home, not the app's data dir — these
 # are ordinary checkouts you work in directly.
 # projects_dir = "/path/to/projects"
+# Recursively discover repositories at TUI/server startup (disabled if absent).
+# Display names are relative to this root, e.g. "devops/terraform". Scanning
+# refreshes existing project names but preserves their IDs, sessions and workspace.
+# New projects go into Main. Manual scans use their own supplied root.
+# repository_scan_dir = "/path/to/repos"
+# Restart the TUI/server after changing this setting.
 
 # Timeout (seconds) for a single repository clone before it is abandoned.
 # Default 1800 (30 min).
@@ -241,6 +247,9 @@ dim_unfocused_opacity = 0.4
 # The sidebar still lists every project. Enabled by default; set to false to
 # always show every section column.
 # hide_empty_sections = true
+# Hide repositories with no sessions from TUI list views. The New Session
+# dialog still offers them in its Project picker. Default false.
+# hide_empty_repositories = false
 
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250

@@ -254,7 +254,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `W` | Workspace picker — switch workspace, or type a new name to create one |
 | palette only | Previous workspace, New workspace…, and Move project to workspace… (moves the selected project; unbound by default) |
 | `i` | Show session info in a modal — metadata, diffstat, PR details, stack chain, `g` for AI summary. Same content as the right pane's Info tab, and the only way to reach it from the board |
-| `n` | New worktree session |
+| `n` | New worktree session (use the Project field to choose another repository, including repositories hidden by `hide_empty_repositories`) |
 | `Shift+E` | Edit selected session (name, program, section, stack base, keep alive) |
 | `t` | New session stacked on top of the selected session's stack |
 | `N` | Add new project |
@@ -269,7 +269,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `Alt-c` | Open/close the conversation overlay: a full-screen chat with a dedicated Claude session whose replies stream in and are spoken aloud via an OpenAI-compatible TTS engine. Enable it first in Settings ▸ Voice (off by default); see [Conversation mode](docs/configuration.md#conversation-mode-tts). The session keeps running when the overlay is closed |
 | `Alt-v` | Voice input (push-to-talk by toggle): press once to start recording the microphone, press again to stop, transcribe via an OpenAI-compatible speech-to-text engine, and send the text to the conversation agent. Works whether the overlay is open or not. Enable it in Settings ▸ Voice (`stt_enabled`, off by default). Can also be triggered **system-wide** via a desktop global shortcut — see [Global voice hotkey](docs/configuration.md#global-voice-hotkey) |
 | `Alt-t` | Dictation (same toggle, different destination): record the microphone and **type the transcript where you are**: the pane you're attached to — agent or shell, local or remote — or, outside a pane, the open dialog's text field (a review comment, the new-session name, the conversation input, a search box), rather than sending it to the conversation agent. Pressed in the bare session list, with nowhere to type, it says so and records nothing. The text is inserted without an Enter unless you set `dictation_submit`; see [Dictation (Alt-t)](docs/configuration.md#dictation-alt-t). Shares the `[stt]` engine and the `stt_enabled` switch with `Alt-v`, and either key stops a recording the other started |
-| `S` | Scan directory for git repos and add them as projects |
+| `S` | Scan directory for git repos using names relative to that directory; set `repository_scan_dir` to scan automatically at startup |
 | `s` | Open shell in worktree (or a project shell when a project is selected in the sidebar) |
 | `m` | Move a card to another column (a stacked session moves with its whole stack; manual override — see [Session List Sections](docs/configuration.md#session-list-sections)) |
 | `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |

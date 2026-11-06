@@ -77,6 +77,14 @@ impl App {
                         "clone_timeout_secs",
                     ),
                     SettingsRow::text(
+                        "Repository Scan Directory",
+                        c.repository_scan_dir
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "(disabled)".into()),
+                        "repository_scan_dir",
+                    ),
+                    SettingsRow::text(
                         "Repo List Timeout (s)",
                         c.repo_list_timeout_secs.to_string(),
                         "repo_list_timeout_secs",
@@ -174,6 +182,11 @@ impl App {
                         "Hide Empty Sections",
                         c.hide_empty_sections,
                         "hide_empty_sections",
+                    ),
+                    SettingsRow::toggle(
+                        "Hide Repositories Without Sessions",
+                        c.hide_empty_repositories,
+                        "hide_empty_repositories",
                     ),
                     SettingsRow::text(
                         "Recent Sessions Limit",
@@ -1377,6 +1390,13 @@ impl App {
                         Some(PathBuf::from(value))
                     };
                 }
+                "repository_scan_dir" => {
+                    self.config.repository_scan_dir = if value.is_empty() || value == "(disabled)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
+                }
                 "clone_timeout_secs" => match value.parse::<u64>() {
                     Ok(v) if v >= 30 => {
                         self.config.clone_timeout_secs = v;
@@ -1832,6 +1852,7 @@ impl App {
             "invert_pr_label_color" => self.config.invert_pr_label_color = value,
             "show_session_program" => self.config.show_session_program = value,
             "hide_empty_sections" => self.config.hide_empty_sections = value,
+            "hide_empty_repositories" => self.config.hide_empty_repositories = value,
             "rounded_borders" => self.config.rounded_borders = value,
             "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
             "precompute_review_caches" => self.config.precompute_review_caches = value,

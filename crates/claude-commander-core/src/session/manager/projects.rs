@@ -2,6 +2,11 @@
 
 use super::*;
 
+enum ProjectRegistration {
+    Direct,
+    Discovered(String),
+}
+
 /// Canonicalize `path`, keeping it unchanged when it can't be resolved (it may
 /// not exist yet, or sit behind a permission the caller will fail on anyway).
 async fn canonical_or_keep(path: &Path) -> PathBuf {
@@ -44,10 +49,25 @@ impl SessionManager {
         repo_path: PathBuf,
         workspace: Option<String>,
     ) -> Result<ProjectId> {
+        self.register_project(repo_path, workspace, ProjectRegistration::Direct)
+            .await
+            .map(|(id, _)| id)
+    }
+
+    async fn register_project(
+        &self,
+        repo_path: PathBuf,
+        workspace: Option<String>,
+        registration: ProjectRegistration,
+    ) -> Result<(ProjectId, bool)> {
         // Discover git repository
         let backend = GitBackend::discover(&repo_path)?;
         let main_branch = backend.detect_main_branch()?;
-        let name = backend.repo_name();
+        let discovered = matches!(&registration, ProjectRegistration::Discovered(_));
+        let name = match registration {
+            ProjectRegistration::Direct => backend.repo_name(),
+            ProjectRegistration::Discovered(name) => name,
+        };
         // Read from the backend we already have open — the repo picker needs
         // this to tell which of the user's GitHub repos are already projects.
         let origin_url = backend.origin_url();
@@ -60,41 +80,60 @@ impl SessionManager {
         let mut project = Project::new(name, repo_path, main_branch);
         project.origin_url = origin_url;
         project.workspace = workspace;
-        let project_id = project.id;
-
-        self.store
+        let (project_id, added) = self
+            .store
             .mutate(move |state| {
+                // Startup scans can overlap across frontends. Recheck identity
+                // under the state-file lock, where insertion is atomic.
+                if discovered
+                    && let Some(existing) = state
+                        .projects
+                        .values_mut()
+                        .find(|existing| existing.repo_path == project.repo_path)
+                {
+                    existing.name = project.name;
+                    return (existing.id, false);
+                }
+                let project_id = project.id;
                 state.add_project(project);
+                (project_id, true)
             })
             .await?;
 
         // Import any existing worktrees as sessions
-        if let Err(e) = self.sync_worktrees(&project_id).await {
+        if added && let Err(e) = self.sync_worktrees(&project_id).await {
             warn!("Failed to sync worktrees on project add: {}", e);
         }
 
-        Ok(project_id)
+        Ok((project_id, added))
     }
 
     /// Scan a directory for git repositories and add them as projects.
     ///
     /// Walks the directory tree recursively. When a `.git` directory is found
     /// the repo is registered and that subtree is not descended further.
-    /// Repos that already exist (matched by canonicalized git root) are skipped
-    /// and keep their workspace; new ones are tagged with `workspace`.
+    /// Names are relative to the scan root. Existing projects keep their IDs,
+    /// sessions and workspace, but their names are refreshed relative to this
+    /// root. New projects are tagged with `workspace`.
     #[instrument(skip(self))]
     pub async fn scan_directory(
         &self,
         dir: &Path,
         workspace: Option<String>,
     ) -> Result<ScanResult> {
+        let _ = tokio::fs::read_dir(dir).await.map_err(|error| {
+            crate::error::GitError::OperationFailed(format!(
+                "Cannot scan {}: {error}",
+                dir.display()
+            ))
+        })?;
         // Collect all existing repo paths for duplicate detection
-        let existing_paths: std::collections::HashSet<PathBuf> = {
+        let mut existing_paths: std::collections::HashMap<PathBuf, String> = {
             let state = self.store.read().await;
             state
                 .projects
                 .values()
-                .map(|p| p.repo_path.clone())
+                .map(|p| (p.repo_path.clone(), p.name.clone()))
                 .collect()
         };
 
@@ -111,6 +150,7 @@ impl SessionManager {
 
         let mut added = 0;
         let mut skipped = 0;
+        let mut renamed = std::collections::HashMap::new();
 
         for repo_path in repo_paths {
             // Resolve to canonical git root for duplicate detection
@@ -124,19 +164,54 @@ impl SessionManager {
                 }
             };
 
-            if existing_paths.contains(&canonical) {
+            let name = repo_path
+                .strip_prefix(dir)
+                .ok()
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .unwrap_or_else(|| canonical.file_name().map(Path::new).unwrap_or(&canonical))
+                .to_string_lossy()
+                .into_owned();
+            if let Some(previous_name) = existing_paths.get(&canonical) {
+                if previous_name != &name {
+                    renamed.insert(canonical, name);
+                }
                 skipped += 1;
                 continue;
             }
 
-            match self.add_project(repo_path, workspace.clone()).await {
-                Ok(_) => added += 1,
+            match self
+                .register_project(
+                    repo_path,
+                    workspace.clone(),
+                    ProjectRegistration::Discovered(name.clone()),
+                )
+                .await
+            {
+                Ok((_, inserted)) => {
+                    existing_paths.insert(canonical, name);
+                    if inserted {
+                        added += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                }
                 Err(e) => {
                     debug!("Failed to add {:?}: {}", canonical, e);
                 }
             }
         }
 
+        if !renamed.is_empty() {
+            self.store
+                .mutate(move |state| {
+                    for project in state.projects.values_mut() {
+                        if let Some(name) = renamed.get(&project.repo_path) {
+                            project.name.clone_from(name);
+                        }
+                    }
+                })
+                .await?;
+        }
         Ok(ScanResult { added, skipped })
     }
 
@@ -144,9 +219,16 @@ impl SessionManager {
     /// Prunes subtrees once a `.git` is found (does not descend into repos).
     fn find_git_repos(dir: &Path) -> Vec<PathBuf> {
         let mut repos = Vec::new();
+        let mut visited = std::collections::HashSet::new();
         let mut stack = vec![dir.to_path_buf()];
 
         while let Some(current) = stack.pop() {
+            let Ok(identity) = std::fs::canonicalize(&current) else {
+                continue;
+            };
+            if !visited.insert(identity) {
+                continue;
+            }
             let entries = match std::fs::read_dir(&current) {
                 Ok(entries) => entries,
                 Err(_) => continue, // permission denied or other error — skip silently
@@ -172,7 +254,8 @@ impl SessionManager {
                 // Prune: don't descend into this repo's subdirectories
             } else {
                 // Not a repo — continue descending
-                stack.extend(subdirs);
+                subdirs.sort();
+                stack.extend(subdirs.into_iter().rev());
             }
         }
 

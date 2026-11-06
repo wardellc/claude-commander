@@ -1091,7 +1091,16 @@ impl App {
         let scoped: Vec<std::borrow::Cow<'_, Snapshot>> = self
             .backends
             .iter()
-            .map(|h| filter.scope(&h.view.snapshot))
+            .map(|h| {
+                let mut snapshot = filter.scope(&h.view.snapshot);
+                if self.config.hide_empty_repositories {
+                    snapshot
+                        .to_mut()
+                        .projects
+                        .retain(|p| !p.session_ids.is_empty());
+                }
+                snapshot
+            })
             .collect();
 
         // Recent-sessions block, prepended above the per-backend tree and

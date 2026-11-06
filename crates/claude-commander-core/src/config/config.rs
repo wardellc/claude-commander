@@ -149,6 +149,11 @@ pub struct Config {
     /// directly. Resolved by [`Config::projects_dir`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projects_dir: Option<PathBuf>,
+    /// Recursively scan this directory for repositories at TUI/server startup.
+    /// Disabled when absent. Names are relative to this root; existing project
+    /// names are refreshed without changing their sessions or workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_scan_dir: Option<PathBuf>,
 
     /// Timeout in seconds for a single repository clone before it is abandoned.
     /// Default 1800 (30 min), generous enough for a large repo on a slow link
@@ -291,6 +296,9 @@ pub struct Config {
     /// the sidebar and backend section assignment are unaffected.
     #[serde(default = "default_true")]
     pub hide_empty_sections: bool,
+    /// Hide repositories without sessions from the TUI session list.
+    /// They remain available in the New Session repository picker.
+    pub hide_empty_repositories: bool,
 
     /// Dim the list views' right-hand pane (preview / shell). The pane is a
     /// passive live capture — keys always drive the session list — so it renders
@@ -630,6 +638,7 @@ impl Default for Config {
             ui_refresh_fps: 30,
             worktrees_dir: None,
             projects_dir: None,
+            repository_scan_dir: None,
             clone_timeout_secs: default_clone_timeout_secs(),
             repo_list_timeout_secs: default_repo_list_timeout_secs(),
             tmux_tmpdir: None,
@@ -654,6 +663,7 @@ impl Default for Config {
             invert_pr_label_color: false,
             show_session_program: false,
             hide_empty_sections: true,
+            hide_empty_repositories: false,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: default_dim_opacity(),
             leader_key: " ".to_string(),
@@ -1694,6 +1704,7 @@ command = "codex"
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
         assert!(!config.show_session_program);
+        assert!(!config.hide_empty_repositories);
         // Hide empty sections is on by default.
         assert!(config.hide_empty_sections);
         // Review cache precompute is on by default.

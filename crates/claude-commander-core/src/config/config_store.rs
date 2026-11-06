@@ -17,6 +17,7 @@ use crate::error::Result;
 /// and cannot be hot-reloaded. Used to detect when a restart is needed.
 #[derive(Debug, Clone, PartialEq)]
 struct InitSnapshot {
+    repository_scan_dir: Option<PathBuf>,
     max_concurrent_tmux: usize,
     capture_cache_ttl_ms: u64,
     diff_cache_ttl_ms: u64,
@@ -33,6 +34,7 @@ struct InitSnapshot {
 impl InitSnapshot {
     fn capture(config: &Config) -> Self {
         Self {
+            repository_scan_dir: config.repository_scan_dir.clone(),
             max_concurrent_tmux: config.max_concurrent_tmux,
             capture_cache_ttl_ms: config.capture_cache_ttl_ms,
             diff_cache_ttl_ms: config.diff_cache_ttl_ms,
@@ -46,7 +48,8 @@ impl InitSnapshot {
     }
 
     fn matches(&self, config: &Config) -> bool {
-        self.max_concurrent_tmux == config.max_concurrent_tmux
+        self.repository_scan_dir == config.repository_scan_dir
+            && self.max_concurrent_tmux == config.max_concurrent_tmux
             && self.capture_cache_ttl_ms == config.capture_cache_ttl_ms
             && self.diff_cache_ttl_ms == config.diff_cache_ttl_ms
             && self.ui_refresh_fps == config.ui_refresh_fps
@@ -76,6 +79,7 @@ impl InitSnapshot {
 ///   loop is spawned once, with a fixed interval, at construction; the idle
 ///   *threshold* is read live each tick and is not restart-required)
 /// - the whole `[server]` table (the HTTP listener is bound once at startup)
+/// - `repository_scan_dir` (repository discovery runs once at startup)
 ///
 /// Call [`restart_required`](Self::restart_required) to check whether any of
 /// those init-time values have diverged from the running config. The flag
@@ -537,6 +541,24 @@ mod tests {
             .unwrap();
 
         assert!(store.restart_required());
+    }
+
+    #[test]
+    fn repository_scan_directory_changes_require_restart() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&path, &config);
+        let store = ConfigStore::with_path(config, path);
+        assert!(!store.restart_required());
+        store
+            .mutate(|config| config.repository_scan_dir = Some(dir.path().join("repos")))
+            .unwrap();
+        assert!(store.restart_required());
+        store
+            .mutate(|config| config.repository_scan_dir = None)
+            .unwrap();
+        assert!(!store.restart_required());
     }
 
     #[test]

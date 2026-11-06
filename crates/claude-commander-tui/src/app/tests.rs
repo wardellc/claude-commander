@@ -1477,6 +1477,119 @@ fn test_hide_empty_sections_toggle_and_apply() {
     assert!(app.config.hide_empty_sections);
 }
 
+#[test]
+fn repository_scan_directory_is_optional_and_editable() {
+    let mut app = make_test_app();
+    assert!(app.config.repository_scan_dir.is_none());
+    let rows = app.build_settings_rows(SettingsTab::General);
+    assert!(
+        rows.iter()
+            .any(|row| row.field_key == "repository_scan_dir")
+    );
+    app.apply_settings_edit(SettingsTab::General, "repository_scan_dir", "/repos");
+    assert_eq!(
+        app.config.repository_scan_dir,
+        Some(std::path::PathBuf::from("/repos"))
+    );
+    app.apply_settings_edit(SettingsTab::General, "repository_scan_dir", "(disabled)");
+    assert!(app.config.repository_scan_dir.is_none());
+}
+
+#[tokio::test]
+async fn hide_empty_repositories_keeps_them_in_new_session_picker() {
+    let mut app = make_test_app();
+    let (mut snapshot, _, populated) = snapshot_with_one_session();
+    let empty = claude_commander_core::session::Project::new(
+        "empty",
+        std::path::PathBuf::from("/tmp/empty"),
+        "main",
+    );
+    let empty_id = empty.id;
+    let mut state = claude_commander_core::config::AppState::default();
+    state.projects.insert(empty_id, empty);
+    snapshot
+        .projects
+        .extend(claude_commander_core::api::snapshot_from_state(&state).projects);
+    app.backends[0].view.snapshot = snapshot;
+    app.ui_state.view_mode = claude_commander_core::config::ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+    assert!(app.ui_state.list_items.iter().any(|row| matches!(row,
+        SessionListItem::Project { id, .. } if *id == empty_id)));
+    let rows = app.build_settings_rows(SettingsTab::General);
+    assert!(
+        rows.iter()
+            .any(|row| row.field_key == "hide_empty_repositories"
+                && row.kind == SettingsRowKind::Toggle(false))
+    );
+    app.apply_bool_setting("hide_empty_repositories", true);
+    app.config.sections = vec![claude_commander_core::session::SectionConfig {
+        name: "Open".into(),
+        ..Default::default()
+    }];
+    for mode in [
+        claude_commander_core::config::ViewMode::ProjectGrouped,
+        claude_commander_core::config::ViewMode::SectionGrouped,
+        claude_commander_core::config::ViewMode::SectionStacks,
+    ] {
+        app.ui_state.view_mode = mode;
+        app.refresh_list_items().await;
+        assert!(!app.ui_state.list_items.iter().any(|row| matches!(row,
+            SessionListItem::Project { id, .. } if *id == empty_id)));
+        assert!(app.ui_state.list_items.iter().any(|row| matches!(row,
+            SessionListItem::Project { id, .. } if *id == populated)));
+    }
+    app.ui_state.selected_project_id = Some((LOCAL_BACKEND_ID, populated));
+    app.handle_new_session().await;
+    let Modal::Input {
+        project_picker: Some(picker),
+        ..
+    } = &app.ui_state.modal
+    else {
+        panic!("expected new-session repository picker");
+    };
+    assert!(picker.choices.iter().any(|choice| choice.id == empty_id));
+
+    app.backends[0].view.snapshot.sessions.clear();
+    for project in &mut app.backends[0].view.snapshot.projects {
+        project.session_ids.clear();
+    }
+    app.refresh_list_items().await;
+    app.ui_state.selected_project_id = None;
+    app.ui_state.modal = Modal::None;
+    app.handle_new_session().await;
+    assert!(matches!(
+        app.ui_state.modal,
+        Modal::Input {
+            project_picker: Some(_),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn new_session_without_selection_skips_disconnected_backends() {
+    let (offline, _, _) = snapshot_with_one_session();
+    let (online, _, online_project) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("offline", offline), ("online", online)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_backend_view(BackendId(2)).await;
+    app.backend_mut_for_test(BackendId(1)).view.connection = ConnectionState::Degraded {
+        reason: "offline".into(),
+    };
+    app.backend_mut_for_test(BackendId(2)).view.connection = ConnectionState::Connected;
+    app.ui_state.selected_project_id = None;
+    app.handle_new_session().await;
+    let Modal::Input {
+        on_submit: InputAction::CreateSession { project_id, .. },
+        ..
+    } = app.ui_state.modal
+    else {
+        panic!("expected new session dialog");
+    };
+    assert_eq!(project_id, online_project);
+}
+
 #[tokio::test]
 async fn toggling_hide_empty_sections_rebuilds_the_list() {
     let mut app = make_test_app();
