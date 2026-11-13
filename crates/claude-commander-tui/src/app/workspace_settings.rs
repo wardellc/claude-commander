@@ -291,7 +291,7 @@ impl App {
             Some(WorkspacesEditing::Creating { .. }) => "Enter: create  Esc: cancel",
             Some(WorkspacesEditing::Renaming { .. }) => "Enter: save  Esc: cancel",
             Some(WorkspacesEditing::MovingProject { .. }) => {
-                "j/k: pick workspace  Enter: move  Esc: cancel"
+                "↑↓: workspace  Space/Enter: move  Esc: cancel"
             }
             None if ws.focus == WorkspacesFocus::List => {
                 "n: new  r: rename  d: delete  J/K: reorder  s: startup  →: details  Tab: switch tab"
@@ -373,7 +373,7 @@ impl App {
                                 target: step(false),
                             });
                         }
-                        (_, KeyCode::Enter) => {
+                        (_, KeyCode::Enter | KeyCode::Char(' ')) if key.modifiers.is_empty() => {
                             if let Some(w) = merged.get(target) {
                                 self.move_project_to_workspace(project_id, w.name.clone())
                                     .await;

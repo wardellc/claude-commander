@@ -67,6 +67,7 @@ use claude_commander_core::tmux::PaneInfo;
 
 mod actions;
 mod background;
+mod choice;
 mod colour_picker;
 mod conversation;
 mod edit_session;
@@ -438,6 +439,8 @@ pub enum Modal {
         /// dropdown is open (Tab/arrows are captured by the dropdown), so the
         /// flag stays consistent with `focus` without needing an explicit reset.
         expanded: bool,
+        /// Original values and search focus for the open choice list.
+        picker_edit: Option<Box<InputPickerEdit>>,
         /// Render the value as bullets instead of plaintext (secret entry,
         /// e.g. a remote server's bearer token). Editing behaves normally;
         /// only the display is masked.
@@ -864,6 +867,7 @@ pub struct SectionsState {
 /// Editing state for the Sections tab
 #[derive(Debug, Clone)]
 pub enum SectionsEditing {
+    Choices(choice::ChoiceList),
     RenamingSection { value: Input },
     EditingPredicate { value: Input },
     CreatingSection { value: Input },
@@ -1176,6 +1180,32 @@ impl PickerOption {
             label: text.clone(),
             value: text,
         }
+    }
+}
+
+/// A choice list edits a temporary selection until accepted. Escape restores
+/// every picker and its branch hint, including the project search query.
+#[derive(Debug, Clone)]
+pub struct InputPickerEdit {
+    project: Option<ProjectPicker>,
+    program: Option<ProgramPicker>,
+    server: Option<ServerPicker>,
+    section: Option<SectionPicker>,
+    branches: Option<Vec<String>>,
+    query: Input,
+    searching: bool,
+}
+
+/// Move through a finite choice list, wrapping in either direction. Empty
+/// lists stay at zero, so a loading or unavailable list is safe to navigate.
+fn cycle_choice(selected: usize, len: usize, forward: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if forward {
+        (selected + 1) % len
+    } else {
+        (selected + len - 1) % len
     }
 }
 

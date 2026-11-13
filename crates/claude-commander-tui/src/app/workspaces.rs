@@ -323,6 +323,7 @@ impl App {
             section_picker: None,
             focus: InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         };
     }

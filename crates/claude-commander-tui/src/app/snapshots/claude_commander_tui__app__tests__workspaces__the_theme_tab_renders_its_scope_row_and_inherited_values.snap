@@ -1,6 +1,6 @@
 ---
 source: crates/claude-commander-tui/src/app/tests.rs
-assertion_line: 11770
+assertion_line: 13117
 expression: terminal.backend()
 ---
 " Sessions [Project]:                ┌ Preview · Info · Shell ──────────────────────────────────────────────────────────┐"
@@ -37,7 +37,7 @@ expression: terminal.backend()
 "              │ Status Bar FG             ██ #cdd6f4  (usual)                                          │               │"
 "              │ Status Bar Accent         ██ #b4befe  (usual)                                          │               │"
 "              │                                                                                        │               │"
-"              │ Tab: switch tab  j/k: navigate  Enter: edit  Esc: close                                │               │"
+"              │ Tab: tabs  ↑↓: field  ←→: change  Space: edit  Enter/Esc: close                        │               │"
 "              └────────────────────────────────────────────────────────────────────────────────────────┘               │"
 "                                    │                                                                                  │"
 "                                    │                                                                                  │"

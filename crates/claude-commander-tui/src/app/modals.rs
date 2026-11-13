@@ -260,12 +260,14 @@ pub(super) fn build_input_modal_lines(
     // Footer hint (context-sensitive), separated by a blank line. On the name
     // row Space types a literal space, so only advertise "Space choose" when a
     // picker row is focused.
-    let footer = if expanded {
-        "↑↓ choose · Enter select · Esc close"
+    let footer = if expanded && focus == InputFocus::Project {
+        "↑↓ results · Tab search · Space/Enter select · Esc cancel"
+    } else if expanded {
+        "↑↓ highlight · Space/Enter select · Esc cancel"
     } else if focus == InputFocus::Name {
         "↑↓ move · Enter create · Esc cancel"
     } else {
-        "↑↓ move · Space choose · Enter create · Esc cancel"
+        "←→ change · Space list · Enter create · Esc cancel"
     };
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(footer, dim_style)));
@@ -330,6 +332,7 @@ impl App {
                 section_picker,
                 focus,
                 expanded,
+                picker_edit,
                 mask,
                 ..
             } => {
@@ -363,7 +366,7 @@ impl App {
                 // number of body lines the (collapsed-or-expanded) layout emits.
                 let modal_width = (area.width * 60 / 100).max(40);
                 let inner_width = modal_width.saturating_sub(2);
-                let (lines, cursor) = build_input_modal_lines(
+                let (lines, mut cursor) = build_input_modal_lines(
                     prompt,
                     shown_value,
                     hint.as_deref(),
@@ -377,6 +380,21 @@ impl App {
                     inner_width,
                     &self.theme,
                 );
+                if let Some(ActiveCursor::Filter { col, .. }) = &mut cursor
+                    && let Some(edit) = picker_edit
+                {
+                    if edit.searching {
+                        let prefix: String = edit
+                            .query
+                            .value()
+                            .chars()
+                            .take(edit.query.cursor())
+                            .collect();
+                        *col = 4 + unicode_width::UnicodeWidthStr::width(prefix.as_str()) as u16;
+                    } else {
+                        cursor = None;
+                    }
+                }
                 let modal_height = (lines.len() as u16 + 2).min(area.height);
                 let modal_area = Rect {
                     x: area.x + (area.width.saturating_sub(modal_width)) / 2,
@@ -862,6 +880,23 @@ impl App {
 
         // Clone picker (in-modal keys, not bindable actions). The command
         // itself is listed under Projects above; these are the picker's own.
+        lines.push(Line::from(""));
+        lines.push(Line::from("Dialog inputs:"));
+        lines.push(Line::from(
+            "  Tab/Shift+Tab: fields; Left/Right: cycle choices or toggle",
+        ));
+        lines.push(Line::from(
+            "  Space: open list; Up/Down: highlight; Space/Enter: select",
+        ));
+        lines.push(Line::from(
+            "  Escape: cancel the list and restore its previous value",
+        ));
+        lines.push(Line::from(
+            "  Type on Project: fresh search; Tab: search/results focus",
+        ));
+        lines.push(Line::from(
+            "  Enter: save form; finish Settings (accepted settings save immediately)",
+        ));
         lines.push(Line::from(""));
         lines.push(Line::from("Clone Repository:"));
         lines.push(Line::from(format!(

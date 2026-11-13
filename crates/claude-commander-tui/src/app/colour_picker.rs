@@ -132,7 +132,7 @@ impl ColourPicker {
         let columns = self.columns.max(1);
         match key.code {
             KeyCode::Esc => return PickerOutcome::Cancel,
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 return PickerOutcome::Pick(self.selected_swatch().map(|s| s.hex.clone()));
             }
             KeyCode::Left | KeyCode::Char('h') => self.selected = self.selected.saturating_sub(1),
@@ -189,7 +189,9 @@ impl ColourPicker {
     /// The footer hint for the picker's current focus.
     pub fn footer_hint(&self) -> &'static str {
         match self.focus {
-            ColourPickerFocus::Grid => "←↓↑→/hjkl: move  Enter: pick  Tab/#: hex  Esc: cancel",
+            ColourPickerFocus::Grid => {
+                "←↓↑→/hjkl: move  Space/Enter: pick  Tab/#: hex  Esc: cancel"
+            }
             ColourPickerFocus::Hex => {
                 "Enter: save  type or paste #rrggbb  Tab: swatches  Esc: cancel"
             }
@@ -412,16 +414,18 @@ mod tests {
 
     #[test]
     fn enter_picks_the_highlighted_swatch_and_no_colour_clears() {
-        let mut p = picker(None);
-        assert_eq!(
-            press(&mut p, &[KeyCode::Right, KeyCode::Enter]),
-            PickerOutcome::Pick(Some("#b4befe".into()))
-        );
-        let mut p = picker(Some("#b4befe"));
-        assert_eq!(
-            press(&mut p, &[KeyCode::Left, KeyCode::Enter]),
-            PickerOutcome::Pick(None)
-        );
+        for accept in [KeyCode::Enter, KeyCode::Char(' ')] {
+            let mut p = picker(None);
+            assert_eq!(
+                press(&mut p, &[KeyCode::Right, accept]),
+                PickerOutcome::Pick(Some("#b4befe".into()))
+            );
+            let mut p = picker(Some("#b4befe"));
+            assert_eq!(
+                press(&mut p, &[KeyCode::Left, accept]),
+                PickerOutcome::Pick(None)
+            );
+        }
     }
 
     #[test]
