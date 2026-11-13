@@ -1632,7 +1632,7 @@ async fn toggling_hide_empty_sections_rebuilds_the_list() {
         theme_scope: app.default_theme_scope(),
         search: None,
     };
-    app.handle_settings_key(key(crossterm::event::KeyCode::Enter), state)
+    app.handle_settings_key(key(crossterm::event::KeyCode::Char(' ')), state)
         .await;
 
     assert!(!app.config.hide_empty_sections);
@@ -5080,6 +5080,7 @@ fn masked_input_modal_renders_bullets_not_the_token() {
         section_picker: None,
         focus: InputFocus::Name,
         expanded: false,
+        picker_edit: None,
         mask: true,
     };
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -5826,6 +5827,7 @@ fn open_create_session_modal(project_id: ProjectId, section: Option<String>) -> 
         section_picker: Some(SectionPicker::new(Vec::new(), None)),
         focus: InputFocus::Name,
         expanded: false,
+        picker_edit: None,
         mask: false,
     }
 }
@@ -11109,6 +11111,7 @@ fn text_input_modal(value: &str, mask: bool) -> Modal {
         section_picker: None,
         focus: crate::app::InputFocus::Name,
         expanded: false,
+        picker_edit: None,
         mask,
     }
 }
@@ -12744,7 +12747,7 @@ mod workspaces {
         assert_eq!(row(&app, "text_accent").inherited_from, Some("preset"));
         // …but its colour rows open the picker, not free text.
         select_row(&mut app, "text_accent");
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         feed(&mut app, KeyCode::Char('#')).await;
         type_programs(&mut app, "123456").await;
         feed(&mut app, KeyCode::Enter).await;
@@ -12759,7 +12762,7 @@ mod workspaces {
     #[tokio::test]
     async fn a_pick_in_a_workspace_scope_writes_its_entry_and_restyles_the_ui() {
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         assert_eq!(picker(&app).selected, 0, "inheriting: the Inherit cell");
         assert_eq!(picker(&app).none_label, "Inherit (usual)");
         feed(&mut app, KeyCode::Char('#')).await;
@@ -12791,7 +12794,7 @@ mod workspaces {
     #[tokio::test]
     async fn picking_a_theme_swatch_saves_its_hex() {
         let mut app = work_theme_tab_on("border_focused").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         feed(&mut app, KeyCode::Char('l')).await;
         feed(&mut app, KeyCode::Right).await;
         feed(&mut app, KeyCode::Char('j')).await;
@@ -12811,14 +12814,14 @@ mod workspaces {
     #[tokio::test]
     async fn the_inherit_cell_clears_the_override_and_an_empty_entry_goes() {
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         feed(&mut app, KeyCode::Char('#')).await;
         type_programs(&mut app, "aabbcc").await;
         feed(&mut app, KeyCode::Enter).await;
         assert!(app.config.workspace_themes.contains_key("Work"));
         // Reopening preselects the swatch that is now Work's own accent;
         // step back to cell 0 and take it.
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         assert_eq!(picker(&app).focus, ColourPickerFocus::Grid);
         assert_eq!(picker(&app).selected_swatch().unwrap().hex, "#aabbcc");
         feed(&mut app, KeyCode::Left).await;
@@ -12836,7 +12839,7 @@ mod workspaces {
     #[tokio::test]
     async fn the_scope_row_switches_to_the_usual_theme() {
         let mut app = work_theme_tab_on("theme_scope").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
             panic!("the scope row opens a picker");
         };
@@ -12852,7 +12855,7 @@ mod workspaces {
                 .all(|r| r.field_key != "theme_reset")
         );
         select_row(&mut app, "text_accent");
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         assert_eq!(picker(&app).none_label, "Inherit (preset)");
         feed(&mut app, KeyCode::Char('#')).await;
         type_programs(&mut app, "010203").await;
@@ -12877,7 +12880,7 @@ mod workspaces {
         ));
         persist_seeded_config(&app);
         app.reload_theme();
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         let Some(SettingsEditing::OptionPicker { options, .. }) = &settings(&app).editing else {
             panic!("the preset row opens a picker");
         };
@@ -12901,7 +12904,7 @@ mod workspaces {
         assert_eq!(row(&app, "border_focused").inherited_from, Some("preset"));
         // Back to "(usual)": the entry is empty again, so it goes.
         select_row(&mut app, "preset");
-        feed(&mut app, KeyCode::Enter).await; // opens on lcars
+        feed(&mut app, KeyCode::Char(' ')).await; // opens on lcars
         for _ in 0..lcars {
             feed(&mut app, KeyCode::Char('k')).await;
         }
@@ -12914,7 +12917,7 @@ mod workspaces {
     async fn reset_to_usual_theme_drops_the_workspaces_entry() {
         let mut app = work_theme_tab_on("theme_reset").await;
         assert_eq!(row(&app, "theme_reset").text_value(), "(already usual)");
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         assert!(
             toast(&app).contains("already uses the usual theme"),
             "{}",
@@ -12925,7 +12928,7 @@ mod workspaces {
             .insert("Work".into(), preset_entry("lcars"));
         persist_seeded_config(&app);
         app.reload_theme();
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         assert!(app.config.workspace_themes.is_empty());
         assert!(
             app.service.read_config().workspace_themes.is_empty(),
@@ -12974,7 +12977,7 @@ mod workspaces {
     #[tokio::test]
     async fn a_colour_picked_for_a_workspace_that_has_gone_is_discarded() {
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         // Off the inherit cell, onto a real swatch — a pick that sets a value.
         feed(&mut app, KeyCode::Char('l')).await;
         assert!(picker(&app).selected_swatch().is_some());
@@ -12991,7 +12994,7 @@ mod workspaces {
     #[tokio::test]
     async fn a_preset_picked_for_a_workspace_that_has_gone_is_discarded() {
         let mut app = work_theme_tab_on("preset").await;
-        feed(&mut app, KeyCode::Enter).await; // the option picker, on "(usual)"
+        feed(&mut app, KeyCode::Char(' ')).await; // the option picker, on "(usual)"
         lose_work(&mut app).await;
         feed(&mut app, KeyCode::Enter).await;
         assert_eq!(
@@ -13026,7 +13029,7 @@ mod workspaces {
     #[tokio::test]
     async fn settings_tab_colour_picker_takes_a_bracketed_paste() {
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         app.handle_input(InputEvent::Paste("  3366ff\n".to_string()))
             .await;
         assert_eq!(picker(&app).hex.value(), "3366ff");
@@ -13040,7 +13043,7 @@ mod workspaces {
     #[tokio::test]
     async fn settings_tab_colour_picker_refuses_invalid_hex() {
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         // Tab goes to the hex row and back without leaving the picker or the
         // Theme tab.
         assert_eq!(picker(&app).focus, ColourPickerFocus::Grid);
@@ -13064,7 +13067,7 @@ mod workspaces {
     #[tokio::test]
     async fn settings_tab_colour_picker_esc_cancels_without_saving() {
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         feed(&mut app, KeyCode::Right).await;
         feed(&mut app, KeyCode::Esc).await;
         assert!(settings(&app).editing.is_none());
@@ -13080,7 +13083,7 @@ mod workspaces {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         feed(&mut app, KeyCode::Tab).await;
         type_programs(&mut app, "#3366f").await;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -13132,7 +13135,7 @@ mod workspaces {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
 
@@ -13173,7 +13176,7 @@ mod workspaces {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
         let drawn = drawn_grid_width(&terminal);
@@ -13192,7 +13195,7 @@ mod workspaces {
         let mut app = work_theme_tab_on("text_accent").await;
         let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap(); // the Theme tab, no picker
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         feed(&mut app, KeyCode::Char('j')).await; // no frame in between
         let stepped = picker(&app).selected;
         terminal.draw(|f| app.render(f)).unwrap();
@@ -13206,7 +13209,7 @@ mod workspaces {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut app = work_theme_tab_on("text_accent").await;
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
         assert_eq!(
@@ -13234,7 +13237,7 @@ mod workspaces {
             Some(WorkspacesEditing::MovingProject { project_id, target: 0 }) if project_id == mp
         ));
         feed(&mut app, KeyCode::Char('j')).await; // target Work
-        feed(&mut app, KeyCode::Enter).await;
+        feed(&mut app, KeyCode::Char(' ')).await;
         let tag = app
             .local_view()
             .snapshot
@@ -13688,6 +13691,257 @@ async fn edit_session_program_field_shows_alias_and_cycles_commands() {
     );
 }
 
+#[tokio::test]
+async fn edit_session_space_opens_a_choice_and_escape_restores_it() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        panic!("editor")
+    };
+    editor.focus = 2;
+    editor.sections = vec![None, Some("Review".into())];
+    editor.section = 0;
+    for code in [KeyCode::Char(' '), KeyCode::Down, KeyCode::Esc] {
+        app.handle_edit_session_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("Escape closed the form")
+    };
+    assert_eq!(editor.focus, 2);
+    assert_eq!(editor.section, 0);
+    for code in [KeyCode::Char(' '), KeyCode::Down, KeyCode::Enter] {
+        app.handle_edit_session_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("Enter submitted the form")
+    };
+    assert_eq!(editor.section, 1);
+}
+
+#[tokio::test]
+async fn settings_choice_arrows_cycle_and_space_opens_a_cancellable_list() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, _) = app_with_remote_session().await;
+    open_general_settings_on(&mut app, "code_host_provider");
+    let key = |code| InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    async fn settle(app: &mut App) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = app.event_loop.next().await.unwrap();
+                let done = matches!(
+                    &event,
+                    AppEvent::StateUpdate(StateUpdate::CodeHostConfigUpdated { .. })
+                );
+                app.process_event(event).await;
+                if done {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let original = app.config.code_host_provider;
+    app.handle_input(key(KeyCode::Right)).await;
+    settle(&mut app).await;
+    assert_ne!(app.config.code_host_provider, original);
+    app.handle_input(key(KeyCode::Left)).await;
+    settle(&mut app).await;
+    assert_eq!(app.config.code_host_provider, original);
+    for code in [KeyCode::Char(' '), KeyCode::Down, KeyCode::Esc] {
+        app.handle_input(key(code)).await;
+    }
+    assert!(matches!(app.ui_state.modal, Modal::Settings(_)));
+    assert_eq!(app.config.code_host_provider, original);
+    // Do not drain completion events between these arrows: each queued
+    // relative step must run even while the service still holds the old value.
+    app.handle_input(key(KeyCode::Right)).await;
+    app.handle_input(key(KeyCode::Right)).await;
+    settle(&mut app).await;
+    settle(&mut app).await;
+    assert_eq!(app.config.code_host_provider, original);
+}
+
+#[tokio::test]
+async fn settings_text_accepts_bracketed_paste() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, _) = app_with_remote_session().await;
+    open_general_settings_on(&mut app, "branch_prefix");
+    app.handle_input(InputEvent::Key(KeyEvent::new(
+        KeyCode::Char(' '),
+        KeyModifiers::NONE,
+    )))
+    .await;
+    app.handle_input(InputEvent::Paste("pasted-prefix".into()))
+        .await;
+    let Modal::Settings(state) = &app.ui_state.modal else {
+        panic!("settings")
+    };
+    let Some(SettingsEditing::TextInput { value }) = &state.editing else {
+        panic!("text editor")
+    };
+    assert!(value.value().contains("pasted-prefix"));
+}
+
+#[tokio::test]
+async fn settings_toggle_arrows_flip_and_enter_finishes_without_another_flip() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = make_test_app();
+    open_general_settings_on(&mut app, "fetch_before_create");
+    let original = app.config.fetch_before_create;
+    for (code, expected) in [
+        (KeyCode::Left, !original),
+        (KeyCode::Right, original),
+        (KeyCode::Char(' '), !original),
+    ] {
+        app.handle_input(InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+            .await;
+        assert_eq!(app.config.fetch_before_create, expected);
+    }
+    app.handle_input(InputEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )))
+    .await;
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    assert_eq!(app.service.read_config().fetch_before_create, !original);
+}
+
+#[tokio::test]
+async fn optional_boolean_settings_cycle_all_three_values() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = make_test_app();
+    app.config.editor_gui = None;
+    app.service.update_config(app.config.clone()).unwrap();
+    open_general_settings_on(&mut app, "editor_gui");
+    for expected in [Some(true), Some(false), None] {
+        app.handle_input(InputEvent::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        assert_eq!(app.config.editor_gui, expected);
+    }
+}
+
+#[tokio::test]
+async fn settings_search_paste_refilters_the_shortcut_list() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Settings(keybindings_settings_state(&app, Some("")));
+    app.handle_input(InputEvent::Paste("no-such-binding-xyz".into()))
+        .await;
+    let Modal::Settings(state) = &app.ui_state.modal else {
+        unreachable!()
+    };
+    assert_eq!(
+        state.search.as_ref().unwrap().value(),
+        "no-such-binding-xyz"
+    );
+    assert!(state.rows.is_empty());
+}
+
+#[tokio::test]
+async fn modified_space_does_not_accept_an_open_settings_choice() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = make_test_app();
+    open_general_settings_on(&mut app, "editor_gui");
+    let original = app.config.editor_gui;
+    for code in [KeyCode::Char(' '), KeyCode::Down] {
+        app.handle_input(InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+            .await;
+    }
+    app.handle_input(InputEvent::Key(KeyEvent::new(
+        KeyCode::Char(' '),
+        KeyModifiers::CONTROL,
+    )))
+    .await;
+    let Modal::Settings(state) = &app.ui_state.modal else {
+        panic!("settings closed")
+    };
+    assert!(state.editing.is_some());
+    assert_eq!(app.config.editor_gui, original);
+}
+
+#[tokio::test]
+async fn delayed_edit_options_keep_the_choice_list_open_until_enter_accepts_it() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, sid) = app_with_remote_session().await;
+    let session = SessionRef::new(BackendId(1), sid);
+    app.ui_state.selected_session_id = Some(session);
+    app.handle_edit_session();
+    let Modal::EditSession(editor) = &mut app.ui_state.modal else {
+        unreachable!()
+    };
+    editor.focus = 2;
+    editor.sections.push(Some("Automatic".into()));
+    for code in [KeyCode::Char(' '), KeyCode::Down] {
+        app.handle_edit_session_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    app.handle_state_update(StateUpdate::SessionEditOptionsLoaded {
+        session,
+        result: Ok(claude_commander_protocol::api::CreateOptions {
+            default_program: "claude".into(),
+            programs: vec![],
+            sections: vec!["Automatic".into(), "Review".into()],
+        }),
+    })
+    .await;
+    app.handle_edit_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let Modal::EditSession(editor) = &app.ui_state.modal else {
+        panic!("Enter submitted the parent form")
+    };
+    assert!(editor.choice.is_none());
+    assert_eq!(
+        editor.sections[editor.section].as_deref(),
+        Some("Automatic")
+    );
+    assert!(editor.sections.contains(&Some("Review".into())));
+}
+
+#[tokio::test]
+async fn sections_multiselect_checks_several_values_and_cancels_as_a_unit() {
+    use claude_commander_core::git::PrState;
+    use claude_commander_core::session::{SectionConfig, section::OneOrMany};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = make_test_app();
+    app.config.sections = vec![SectionConfig {
+        name: "Review".into(),
+        ..Default::default()
+    }];
+    app.service.update_config(app.config.clone()).unwrap();
+    open_general_settings_on(&mut app, "branch_prefix");
+    let Modal::Settings(state) = &mut app.ui_state.modal else {
+        unreachable!()
+    };
+    state.tab = SettingsTab::Sections;
+    state.sections_state.focus = SectionsFocus::Predicates;
+    let key = |code| InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    for code in [
+        KeyCode::Char(' '),
+        KeyCode::Char(' '),
+        KeyCode::Down,
+        KeyCode::Char(' '),
+        KeyCode::Esc,
+    ] {
+        app.handle_input(key(code)).await;
+    }
+    assert!(app.config.sections[0].pr_state.is_none());
+    for code in [
+        KeyCode::Char(' '),
+        KeyCode::Char(' '),
+        KeyCode::Down,
+        KeyCode::Char(' '),
+        KeyCode::Enter,
+    ] {
+        app.handle_input(key(code)).await;
+    }
+    assert!(matches!(&app.config.sections[0].pr_state,
+        Some(OneOrMany::Any(values)) if values == &[PrState::Open, PrState::Merged]));
+    assert!(matches!(app.ui_state.modal, Modal::Settings(_)));
+}
+
 /// A GitLab hostname edit goes through the service's code-host path, as a
 /// provider change does, so the cached glab probe is reset and PRs refetched
 /// rather than the hostname only being written to config.
@@ -13696,7 +13950,7 @@ async fn gitlab_hostname_edit_runs_through_the_code_host_path() {
     let (mut app, _) = app_with_remote_session().await;
     open_general_settings_on(&mut app, "gitlab_hostname");
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let keys = std::iter::once(KeyCode::Enter)
+    let keys = std::iter::once(KeyCode::Char(' '))
         .chain(std::iter::repeat_n(KeyCode::Backspace, 32))
         .chain("gitlab.example.com".chars().map(KeyCode::Char))
         .chain(std::iter::once(KeyCode::Enter));
@@ -13897,7 +14151,7 @@ async fn provider_picker_runs_in_background_and_refreshes_its_display() {
     let (mut app, _) = app_with_remote_session().await;
     open_general_settings_on(&mut app, "code_host_provider");
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
+    for code in [KeyCode::Char(' '), KeyCode::Down, KeyCode::Enter] {
         app.process_event(AppEvent::Input(crate::event::InputEvent::Key(
             KeyEvent::new(code, KeyModifiers::NONE),
         )))

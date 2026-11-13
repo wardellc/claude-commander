@@ -897,6 +897,7 @@ impl App {
                 section_picker,
                 focus: super::InputFocus::Name,
                 expanded: false,
+                picker_edit: None,
                 mask: false,
             };
             self.spawn_remote_program_picker(backend, project_id);
@@ -978,6 +979,7 @@ impl App {
             section_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         };
         self.spawn_remote_program_picker(sref.backend, project_id);
@@ -2406,6 +2408,7 @@ impl App {
             section_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         };
     }
@@ -2622,6 +2625,7 @@ impl App {
             section_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         };
     }
@@ -2818,6 +2822,7 @@ impl App {
             section_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         };
     }
@@ -3065,6 +3070,7 @@ impl App {
                     section_picker: None,
                     focus: super::InputFocus::Name,
                     expanded: false,
+                    picker_edit: None,
                     mask: false,
                 };
             }
@@ -3097,6 +3103,7 @@ impl App {
                         section_picker: None,
                         focus: super::InputFocus::Name,
                         expanded: false,
+                        picker_edit: None,
                         mask: false,
                     };
                     return;
@@ -3113,6 +3120,7 @@ impl App {
                     section_picker: None,
                     focus: super::InputFocus::Name,
                     expanded: false,
+                    picker_edit: None,
                     mask: true,
                 };
             }

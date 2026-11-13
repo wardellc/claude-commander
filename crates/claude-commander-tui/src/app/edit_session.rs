@@ -2,6 +2,13 @@ use super::*;
 use claude_commander_protocol::api::{CreateOptions, EditSession, ProgramInfo};
 use crossterm::event::{KeyCode, KeyEvent};
 
+#[derive(Debug, PartialEq, Eq)]
+enum ChoiceKey {
+    Program(String),
+    Section(Option<String>),
+    Base(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionEditor {
     pub session: SessionRef,
@@ -16,6 +23,8 @@ pub struct SessionEditor {
     pub focus: usize,
     pub programs: Vec<ProgramInfo>,
     pub restart_now: bool,
+    /// Highlight in an open choice list; the form value changes on acceptance.
+    pub choice: Option<usize>,
 }
 
 impl SessionEditor {
@@ -52,9 +61,11 @@ impl SessionEditor {
             programs: model.programs.clone(),
             model,
             restart_now: false,
+            choice: None,
         }
     }
     pub fn load_options(&mut self, opts: CreateOptions) {
+        let open_choice = self.choice.map(|index| self.choice_key(index));
         let section = self.sections[self.section].clone();
         claude_commander_viewmodel::session_editor::load_options(&mut self.model, &opts);
         self.sections = vec![None];
@@ -66,6 +77,13 @@ impl SessionEditor {
             .position(|s| *s == section)
             .unwrap_or(0);
         self.programs = self.model.programs.clone();
+        if let Some(key) = open_choice {
+            self.choice = Some(
+                (0..self.choice_labels().len())
+                    .find(|&index| self.choice_key(index) == key)
+                    .unwrap_or_else(|| self.choice_index()),
+            );
+        }
     }
     fn plan(
         &self,
@@ -94,30 +112,91 @@ impl SessionEditor {
         Ok(edit)
     }
     fn cycle(&mut self, forward: bool) {
-        fn step(index: usize, len: usize, forward: bool) -> usize {
-            if forward {
-                (index + 1) % len
-            } else {
-                (index + len - 1) % len
-            }
+        if self.focus == 4 {
+            self.keep_alive = !self.keep_alive;
+            return;
         }
+        let index = cycle_choice(self.choice_index(), self.choice_labels().len(), forward);
+        self.select_choice(index);
+    }
+    fn choice_index(&self) -> usize {
+        match self.focus {
+            1 => self
+                .programs
+                .iter()
+                .position(|p| p.command == self.program.value())
+                .unwrap_or(0),
+            2 => self.section,
+            3 => self.base,
+            _ => 0,
+        }
+    }
+    fn choice_labels(&self) -> Vec<String> {
+        match self.focus {
+            1 => self.programs.iter().map(|p| p.label.clone()).collect(),
+            2 => self
+                .sections
+                .iter()
+                .map(|s| s.clone().unwrap_or_else(|| "Automatic".into()))
+                .collect(),
+            3 => self.bases.iter().map(|(_, label)| label.clone()).collect(),
+            _ => vec![],
+        }
+    }
+    fn choice_key(&self, index: usize) -> Option<ChoiceKey> {
+        match self.focus {
+            1 => self
+                .programs
+                .get(index)
+                .map(|p| ChoiceKey::Program(p.command.clone())),
+            2 => self.sections.get(index).cloned().map(ChoiceKey::Section),
+            3 => self
+                .model
+                .bases
+                .get(index)
+                .map(|b| ChoiceKey::Base(b.id.clone())),
+            _ => None,
+        }
+    }
+    fn select_choice(&mut self, index: usize) {
         match self.focus {
             1 => {
-                let index = self
-                    .programs
-                    .iter()
-                    .position(|s| s.command == self.program.value())
-                    .unwrap_or(0);
-                self.program = self.programs[step(index, self.programs.len(), forward)]
-                    .command
-                    .clone()
-                    .into();
+                if let Some(program) = self.programs.get(index) {
+                    self.program = program.command.clone().into();
+                }
             }
-            2 => self.section = step(self.section, self.sections.len(), forward),
-            3 => self.base = step(self.base, self.bases.len(), forward),
-            4 => self.keep_alive = !self.keep_alive,
+            2 if index < self.sections.len() => self.section = index,
+            3 if index < self.bases.len() => self.base = index,
             _ => {}
         }
+    }
+    fn handle_choice_key(&mut self, key: KeyEvent) -> bool {
+        if !key.modifiers.is_empty() {
+            return self.choice.is_some();
+        }
+        if let Some(selected) = self.choice {
+            match key.code {
+                KeyCode::Esc => self.choice = None,
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.select_choice(selected);
+                    self.choice = None;
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.choice = Some(cycle_choice(
+                        selected,
+                        self.choice_labels().len(),
+                        key.code == KeyCode::Down,
+                    ))
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if key.code == KeyCode::Char(' ') && (1..=3).contains(&self.focus) {
+            self.choice = Some(self.choice_index());
+            return true;
+        }
+        false
     }
 }
 
@@ -166,7 +245,11 @@ impl App {
         if warning {
             match key.code {
                 KeyCode::Esc => self.ui_state.modal = Modal::EditSession(editor),
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Char(' ')
+                | KeyCode::Tab
+                | KeyCode::BackTab => {
                     editor.restart_now = !editor.restart_now;
                     self.ui_state.modal = Modal::EditSessionRestart(editor);
                 }
@@ -178,6 +261,10 @@ impl App {
                 }
                 _ => self.ui_state.modal = Modal::EditSessionRestart(editor),
             }
+            return;
+        }
+        if editor.handle_choice_key(key) {
+            self.ui_state.modal = Modal::EditSession(editor);
             return;
         }
         match key.code {
@@ -199,10 +286,12 @@ impl App {
                     return;
                 }
             }
-            KeyCode::Left | KeyCode::Right if editor.focus >= 1 => {
+            KeyCode::Left | KeyCode::Right if editor.focus >= 1 && key.modifiers.is_empty() => {
                 editor.cycle(key.code == KeyCode::Right)
             }
-            KeyCode::Char(' ') if editor.focus >= 1 => editor.cycle(true),
+            KeyCode::Char(' ') if editor.focus >= 1 && key.modifiers.is_empty() => {
+                editor.cycle(true)
+            }
             _ if editor.focus == 0 => {
                 edit_text_input(&mut editor.name, key);
             }
@@ -258,7 +347,15 @@ pub(super) fn render(
     warning: bool,
     theme: &Theme,
 ) {
-    let area = super::modals::centered_rect(75, 14, area);
+    let area = super::modals::centered_rect(
+        75,
+        14 + if editor.choice.is_some() {
+            editor.choice_labels().len().min(6) as u16
+        } else {
+            0
+        },
+        area,
+    );
     frame.render_widget(Clear, area);
     let title = if warning {
         " Restart session? "
@@ -322,10 +419,40 @@ pub(super) fn render(
                 )
             })
             .collect();
+        if let Some(selected) = editor.choice {
+            let labels = editor.choice_labels();
+            let start = super::actions::adjust_list_scroll(selected, 0, 6);
+            lines.splice(
+                editor.focus + 1..editor.focus + 1,
+                labels
+                    .into_iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(6)
+                    .map(|(i, label)| {
+                        Line::styled(
+                            format!("    {label}"),
+                            if i == selected {
+                                theme.selection()
+                            } else {
+                                Style::default().fg(theme.text_secondary)
+                            },
+                        )
+                    }),
+            );
+        }
         lines.extend([
             Line::from(""),
-            Line::from("Tab/↑/↓ field · ←/→ or Space choose option"),
-            Line::from("Enter save · Esc cancel"),
+            Line::from(if editor.choice.is_some() {
+                "↑↓ highlight · Space/Enter select · Esc cancel list"
+            } else {
+                "Tab/↑/↓ field · ←→ change · Space list/toggle"
+            }),
+            Line::from(if editor.choice.is_some() {
+                ""
+            } else {
+                "Enter save · Esc cancel"
+            }),
             Line::from("Stack base changes metadata and PR target; git history is unchanged."),
         ]);
         lines

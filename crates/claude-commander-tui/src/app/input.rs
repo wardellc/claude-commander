@@ -161,6 +161,7 @@ fn list_row_at(
 /// `&mut self.ui_state.modal` borrow has been released.
 #[derive(Debug, PartialEq, Eq)]
 enum Refilter {
+    SettingsSearch,
     CheckoutBranch,
     QuickSwitch,
 }
@@ -171,6 +172,11 @@ enum Refilter {
 enum TextField<'a> {
     /// A single-line field with nothing to recompute afterwards.
     Line(&'a mut Input),
+    Project {
+        picker: &'a mut ProjectPicker,
+        edit: &'a mut super::InputPickerEdit,
+        branches: &'a mut Option<Vec<String>>,
+    },
     /// A single-line query whose filtered list the caller recomputes.
     Query(&'a mut Input, Refilter),
     /// The path field, which owns its completer and refilters inline.
@@ -188,9 +194,35 @@ enum TextField<'a> {
 /// The open modal's text field, or `None` when it has none. The review view
 /// only has one while a comment draft is open.
 fn text_field(modal: &mut Modal) -> Option<TextField<'_>> {
+    if matches!(
+        modal,
+        Modal::Input {
+            focus: super::InputFocus::Project,
+            ..
+        }
+    ) {
+        open_input_choice(modal);
+    }
     Some(match modal {
-        Modal::EditSession(editor) if editor.focus == 0 => TextField::Line(&mut editor.name),
-        Modal::Input { value, .. } => TextField::Line(value),
+        Modal::EditSession(editor) if editor.focus == 0 && editor.choice.is_none() => {
+            TextField::Line(&mut editor.name)
+        }
+        Modal::Input {
+            value,
+            focus: super::InputFocus::Name,
+            ..
+        } => TextField::Line(value),
+        Modal::Input {
+            project_picker: Some(picker),
+            picker_edit: Some(edit),
+            focus: super::InputFocus::Project,
+            existing_branches,
+            ..
+        } => TextField::Project {
+            picker,
+            edit,
+            branches: existing_branches,
+        },
         Modal::Conversation { input, .. } => TextField::Line(input),
         Modal::PathInput {
             value,
@@ -211,8 +243,39 @@ fn text_field(modal: &mut Modal) -> Option<TextField<'_>> {
             editing: Some(super::SettingsEditing::Colour { picker }),
             ..
         }) => TextField::Colour(picker),
+        Modal::Settings(SettingsState {
+            search: Some(query),
+            ..
+        }) => TextField::Query(query, Refilter::SettingsSearch),
+        Modal::Settings(state) => TextField::Line(settings_text_field(state)?),
         _ => return None,
     })
+}
+
+fn settings_text_field(state: &mut SettingsState) -> Option<&mut Input> {
+    if let Some(super::SettingsEditing::TextInput { value }) = &mut state.editing {
+        return Some(value);
+    }
+    match state.tab {
+        super::SettingsTab::Sections => match state.sections_state.editing.as_mut()? {
+            super::SectionsEditing::RenamingSection { value }
+            | super::SectionsEditing::EditingPredicate { value }
+            | super::SectionsEditing::CreatingSection { value } => Some(value),
+            super::SectionsEditing::Choices(_) => None,
+        },
+        super::SettingsTab::Programs => match state.programs_state.editing.as_mut()? {
+            super::ProgramsEditing::RenamingLabel { value }
+            | super::ProgramsEditing::EditingField { value }
+            | super::ProgramsEditing::CreatingLabel { value }
+            | super::ProgramsEditing::CreatingCommand { value } => Some(value),
+        },
+        super::SettingsTab::Workspaces => match state.workspaces_state.editing.as_mut()? {
+            super::WorkspacesEditing::Creating { value }
+            | super::WorkspacesEditing::Renaming { value } => Some(value),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The open modal's text field if dictation may type into it. Narrower than
@@ -236,6 +299,20 @@ impl TextField<'_> {
         let clean = || text.replace(['\n', '\r'], "");
         match self {
             TextField::Line(value) => super::insert_into_input(value, &clean()),
+            TextField::Project {
+                picker,
+                edit,
+                branches,
+            } => {
+                if !edit.searching {
+                    edit.query = Input::default();
+                }
+                edit.searching = true;
+                super::insert_into_input(&mut edit.query, &clean());
+                picker.filter = edit.query.value().to_string();
+                picker.apply_filter();
+                refresh_branch_hint(branches, picker);
+            }
             TextField::Query(query, refilter) => {
                 super::insert_into_input(query, &clean());
                 return Some(refilter);
@@ -340,20 +417,61 @@ enum InputKeyOutcome {
     ServerChanged,
 }
 
-/// Pure key routing for the New Session dialog, mirroring `apply_paste_to_modal`
-/// so it can be unit-tested without an `App`. Owns focus movement, dropdown
-/// expand/collapse, project-filter editing, and name-field editing. Returns
-/// `Submit`/`Cancel` for the two outcomes the caller must action (they need
-/// `App` to run); everything else is `Handled`.
-///
-/// Interaction (collapsed): ↑/↓ and Tab/Shift+Tab move focus between the present
-/// rows; Enter submits; Esc cancels; on a picker row Space/→ opens the dropdown,
-/// and typing on the Project row opens it and starts filtering. Expanded: ↑/↓
-/// navigate the picker, Enter/Space/→ confirm-and-collapse, Esc collapses, and
-/// (Project only) characters filter.
+/// Open a choice list with a reversible snapshot. Search starts empty each time
+/// a project choice is opened; the currently selected project is retained.
+fn open_input_choice(modal: &mut Modal) {
+    let Modal::Input {
+        project_picker,
+        program_picker,
+        server_picker,
+        section_picker,
+        existing_branches,
+        expanded,
+        picker_edit,
+        focus,
+        ..
+    } = modal
+    else {
+        return;
+    };
+    if *expanded {
+        return;
+    }
+    *picker_edit = Some(Box::new(super::InputPickerEdit {
+        project: project_picker.clone(),
+        program: program_picker.clone(),
+        server: server_picker.clone(),
+        section: section_picker.clone(),
+        branches: existing_branches.clone(),
+        query: Input::default(),
+        searching: false,
+    }));
+    *expanded = true;
+    if let Some(picker) = project_picker
+        .as_mut()
+        .filter(|_| *focus == super::InputFocus::Project)
+    {
+        picker.filter.clear();
+        picker.apply_filter();
+    }
+}
+
+/// Collapsed choices cycle with Left/Right and open with Space. An open list
+/// consumes Enter/Space to accept or Escape to restore its opening value;
+/// Enter reaches the form only when no list is open.
 fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) -> InputKeyOutcome {
     use super::InputFocus;
     use crossterm::event::KeyCode;
+    let plain = key.modifiers.is_empty();
+    let open = matches!(modal, Modal::Input { focus, expanded: false, .. }
+        if *focus != InputFocus::Name && ((plain && key.code == KeyCode::Char(' '))
+            || (*focus == InputFocus::Project && key.code != KeyCode::Char(' ') && palette_text_char(&key).is_some())));
+    if open {
+        open_input_choice(modal);
+        if key.code == KeyCode::Char(' ') {
+            return InputKeyOutcome::Handled;
+        }
+    }
     let Modal::Input {
         value,
         existing_branches,
@@ -363,133 +481,140 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
         section_picker,
         focus,
         expanded,
+        picker_edit,
         ..
     } = modal
     else {
         return InputKeyOutcome::Handled;
     };
 
-    // --- Expanded: keys drive the open dropdown. ---
     if *expanded {
+        if plain && key.code == KeyCode::Esc {
+            if let Some(original) = picker_edit.take() {
+                // Restore only this field's value. Remote options may have
+                // arrived while the list was open; keep those authoritative
+                // choices instead of replacing them with the opening snapshot.
+                match focus {
+                    InputFocus::Project => {
+                        *project_picker = original.project;
+                        *existing_branches = original.branches;
+                    }
+                    InputFocus::Program => {
+                        if let (Some(current), Some(before)) = (program_picker, original.program)
+                            && let Some(index) = current.choices.iter().position(|p| {
+                                Some(p.command.as_str()) == before.selected_command().as_deref()
+                            })
+                        {
+                            current.selected = index;
+                        }
+                    }
+                    InputFocus::Section => {
+                        if let (Some(current), Some(before)) = (section_picker, original.section)
+                            && let Some(index) = current
+                                .choices
+                                .iter()
+                                .position(|s| Some(s) == before.choices.get(before.selected))
+                        {
+                            current.selected = index;
+                        }
+                    }
+                    InputFocus::Server => *server_picker = original.server,
+                    InputFocus::Name => {}
+                }
+            }
+            *expanded = false;
+            return InputKeyOutcome::Handled;
+        }
+        let searching = *focus == InputFocus::Project
+            && picker_edit.as_ref().is_some_and(|edit| edit.searching);
+        if plain && (key.code == KeyCode::Enter || (key.code == KeyCode::Char(' ') && !searching)) {
+            if *focus == InputFocus::Project
+                && project_picker
+                    .as_ref()
+                    .is_some_and(|p| p.selected_id().is_none())
+            {
+                return InputKeyOutcome::Handled;
+            }
+            *expanded = false;
+            *picker_edit = None;
+            if *focus == InputFocus::Server
+                && let Some(picker) = server_picker
+                && picker.selected != picker.committed
+            {
+                picker.committed = picker.selected;
+                return InputKeyOutcome::ServerChanged;
+            }
+            return InputKeyOutcome::Handled;
+        }
+        let direction = match key.code {
+            KeyCode::Up if plain => Some(false),
+            KeyCode::Down if plain => Some(true),
+            _ => None,
+        };
         match focus {
             InputFocus::Project => {
-                let Some(picker) = project_picker.as_mut() else {
-                    *expanded = false;
-                    return InputKeyOutcome::Handled;
-                };
-                match key.code {
-                    KeyCode::Up => {
-                        picker.select_up();
-                        refresh_branch_hint(existing_branches, picker);
-                    }
-                    KeyCode::Down => {
-                        picker.select_down();
-                        refresh_branch_hint(existing_branches, picker);
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Esc => {
-                        *expanded = false;
-                    }
-                    KeyCode::Backspace => {
-                        if picker.filter.pop().is_some() {
-                            picker.apply_filter();
-                            refresh_branch_hint(existing_branches, picker);
+                if let Some(picker) = project_picker {
+                    if let Some(forward) = direction {
+                        picker.selected =
+                            super::cycle_choice(picker.selected, picker.filtered.len(), forward);
+                        picker.adjust_scroll();
+                        if let Some(edit) = picker_edit {
+                            edit.searching = false;
+                        }
+                    } else if let Some(edit) = picker_edit {
+                        match key.code {
+                            KeyCode::Tab | KeyCode::BackTab => edit.searching = !edit.searching,
+                            _ => {
+                                if !edit.searching && palette_text_char(&key).is_some() {
+                                    edit.query = Input::default();
+                                    edit.searching = true;
+                                }
+                                if edit.searching && super::edit_text_input(&mut edit.query, key) {
+                                    picker.filter = edit.query.value().to_string();
+                                    picker.apply_filter();
+                                }
+                            }
                         }
                     }
-                    _ => {
-                        if let Some(c) = palette_text_char(&key) {
-                            picker.filter.push(c);
-                            picker.apply_filter();
-                            refresh_branch_hint(existing_branches, picker);
-                        }
-                    }
+                    refresh_branch_hint(existing_branches, picker);
                 }
             }
             InputFocus::Program => {
-                let Some(picker) = program_picker.as_mut() else {
-                    *expanded = false;
-                    return InputKeyOutcome::Handled;
-                };
-                match key.code {
-                    KeyCode::Up => picker.select_up(),
-                    KeyCode::Down => picker.select_down(),
-                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Esc => {
-                        *expanded = false;
-                    }
-                    _ => {}
+                if let (Some(picker), Some(forward)) = (program_picker, direction) {
+                    picker.selected =
+                        super::cycle_choice(picker.selected, picker.choices.len(), forward);
                 }
             }
             InputFocus::Section => {
-                let Some(picker) = section_picker.as_mut() else {
-                    *expanded = false;
-                    return InputKeyOutcome::Handled;
-                };
-                match key.code {
-                    KeyCode::Up => picker.select_up(),
-                    KeyCode::Down => picker.select_down(),
-                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Esc => {
-                        *expanded = false;
-                    }
-                    _ => {}
+                if let (Some(picker), Some(forward)) = (section_picker, direction) {
+                    picker.selected =
+                        super::cycle_choice(picker.selected, picker.choices.len(), forward);
                 }
             }
             InputFocus::Server => {
-                let Some(picker) = server_picker.as_mut() else {
-                    *expanded = false;
-                    return InputKeyOutcome::Handled;
-                };
-                match key.code {
-                    KeyCode::Up => picker.select_up(),
-                    KeyCode::Down => picker.select_down(),
-                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right => {
-                        *expanded = false;
-                        // A confirm that moved off the applied selection needs the
-                        // caller to rebuild the dependent pickers for the new
-                        // backend; re-confirming the same server is a no-op.
-                        if picker.selected != picker.committed {
-                            picker.committed = picker.selected;
-                            return InputKeyOutcome::ServerChanged;
-                        }
-                    }
-                    // Esc abandons the in-progress highlight, snapping back to the
-                    // applied server so no rebuild is triggered.
-                    KeyCode::Esc => {
-                        picker.selected = picker.committed;
-                        *expanded = false;
-                    }
-                    _ => {}
+                if let (Some(picker), Some(forward)) = (server_picker, direction) {
+                    picker.selected =
+                        super::cycle_choice(picker.selected, picker.choices.len(), forward);
                 }
             }
-            // The name field never expands; treat as a stray state and reset.
             InputFocus::Name => *expanded = false,
         }
         return InputKeyOutcome::Handled;
     }
-
-    // --- Collapsed: Enter/Esc act on the whole dialog; movement + activation. ---
-    let has_project = project_picker.is_some();
-    let has_program = program_picker.is_some();
-    // A section picker holding only the catch-all (no configured sections, or a
-    // remote whose options haven't loaded) is hidden and unfocusable.
-    let has_section = section_picker.as_ref().is_some_and(|p| p.choices.len() > 1);
     let fields = super::FieldsPresent {
         server: server_picker.is_some(),
-        project: has_project,
-        program: has_program,
-        section: has_section,
+        project: project_picker.is_some(),
+        program: program_picker.is_some(),
+        section: section_picker.as_ref().is_some_and(|p| p.choices.len() > 1),
     };
     match key.code {
-        KeyCode::Enter => {
-            // A project picker with no current match has nothing to create
-            // under. Rather than silently ignore Enter, reopen the Project
-            // dropdown so the `(no matching projects)` row is visible and the
-            // user can see why — and keep the gate here (pure + testable)
-            // rather than in the `App` caller.
+        KeyCode::Enter if plain => {
             if project_picker
                 .as_ref()
                 .is_some_and(|p| p.selected_id().is_none())
             {
                 *focus = InputFocus::Project;
-                *expanded = true;
+                open_input_choice(modal);
                 return InputKeyOutcome::Handled;
             }
             return InputKeyOutcome::Submit;
@@ -497,41 +622,48 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
         KeyCode::Esc => return InputKeyOutcome::Cancel,
         KeyCode::Tab | KeyCode::Down => *focus = focus.next(fields),
         KeyCode::BackTab | KeyCode::Up => *focus = focus.prev(fields),
-        _ => match focus {
-            InputFocus::Name => {
-                super::edit_text_input(value, key);
-            }
-            InputFocus::Server => {
-                if matches!(key.code, KeyCode::Char(' ') | KeyCode::Right) && fields.server {
-                    *expanded = true;
-                }
-            }
-            InputFocus::Project => match key.code {
-                // Space / → open the dropdown.
-                KeyCode::Char(' ') | KeyCode::Right if has_project => *expanded = true,
-                // Typing a filter char opens the dropdown and starts filtering.
-                _ => {
-                    if let (Some(picker), Some(c)) =
-                        (project_picker.as_mut(), palette_text_char(&key))
-                    {
-                        *expanded = true;
-                        picker.filter.push(c);
+        KeyCode::Left | KeyCode::Right if plain && *focus != InputFocus::Name => {
+            let forward = key.code == KeyCode::Right;
+            match focus {
+                InputFocus::Project => {
+                    if let Some(picker) = project_picker {
+                        picker.filter.clear();
                         picker.apply_filter();
+                        picker.selected =
+                            super::cycle_choice(picker.selected, picker.filtered.len(), forward);
+                        picker.adjust_scroll();
                         refresh_branch_hint(existing_branches, picker);
                     }
                 }
-            },
-            InputFocus::Program => {
-                if matches!(key.code, KeyCode::Char(' ') | KeyCode::Right) && has_program {
-                    *expanded = true;
+                InputFocus::Program => {
+                    if let Some(picker) = program_picker {
+                        picker.selected =
+                            super::cycle_choice(picker.selected, picker.choices.len(), forward);
+                    }
                 }
-            }
-            InputFocus::Section => {
-                if matches!(key.code, KeyCode::Char(' ') | KeyCode::Right) && has_section {
-                    *expanded = true;
+                InputFocus::Section => {
+                    if let Some(picker) = section_picker {
+                        picker.selected =
+                            super::cycle_choice(picker.selected, picker.choices.len(), forward);
+                    }
                 }
+                InputFocus::Server => {
+                    if let Some(picker) = server_picker {
+                        picker.selected =
+                            super::cycle_choice(picker.selected, picker.choices.len(), forward);
+                        if picker.selected != picker.committed {
+                            picker.committed = picker.selected;
+                            return InputKeyOutcome::ServerChanged;
+                        }
+                    }
+                }
+                InputFocus::Name => {}
             }
-        },
+        }
+        _ if *focus == InputFocus::Name => {
+            super::edit_text_input(value, key);
+        }
+        _ => {}
     }
     InputKeyOutcome::Handled
 }
@@ -812,6 +944,7 @@ impl App {
     /// Run the refilter a [`TextField::insert`] left to the caller.
     fn finish_text_insert(&mut self, refilter: Option<Refilter>) {
         match refilter {
+            Some(Refilter::SettingsSearch) => self.refilter_settings_search(),
             Some(Refilter::CheckoutBranch) => self.refilter_checkout_branches(),
             Some(Refilter::QuickSwitch) => self.refilter_quick_switch(),
             None => {}
@@ -2390,6 +2523,7 @@ mod tests {
             section_picker: None,
             focus: crate::app::InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         }
     }
@@ -2634,6 +2768,7 @@ diff --git a/a.rs b/a.rs
             section_picker: None,
             focus: InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         }
     }
@@ -2666,6 +2801,7 @@ diff --git a/a.rs b/a.rs
             )),
             focus: InputFocus::Name,
             expanded: false,
+            picker_edit: None,
             mask: false,
         }
     }
@@ -2698,6 +2834,135 @@ diff --git a/a.rs b/a.rs
             handle_input_modal_key(&mut m, key(KeyCode::Esc)),
             InputKeyOutcome::Cancel
         );
+    }
+
+    #[test]
+    fn choice_arrows_cycle_without_opening_and_escape_restores_the_opening_value() {
+        let mut m = session_modal(None, Some(program_fixture(&["claude", "codex"], 0)));
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        handle_input_modal_key(&mut m, key(KeyCode::Left));
+        assert!(!expanded_of(&m));
+        let selected = |m: &Modal| match m {
+            Modal::Input {
+                program_picker: Some(p),
+                ..
+            } => p.selected,
+            _ => unreachable!(),
+        };
+        assert_eq!(selected(&m), 1);
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' ')));
+        handle_input_modal_key(&mut m, key(KeyCode::Up));
+        handle_input_modal_key(&mut m, key(KeyCode::Esc));
+        assert_eq!(selected(&m), 1);
+        assert!(!expanded_of(&m));
+    }
+
+    #[test]
+    fn a_new_project_search_replaces_the_previous_query() {
+        let mut m = session_modal(Some(project_fixture(&["alpha", "beta"], 0)), None);
+        for code in [
+            KeyCode::Tab,
+            KeyCode::Char('a'),
+            KeyCode::Enter,
+            KeyCode::Char('b'),
+        ] {
+            handle_input_modal_key(&mut m, key(code));
+        }
+        match &m {
+            Modal::Input {
+                project_picker: Some(p),
+                ..
+            } => assert_eq!(p.filter, "b"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn cancelling_program_selection_preserves_newly_loaded_options() {
+        let mut m = session_modal(None, Some(program_fixture(&["claude"], 0)));
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' ')));
+        let Modal::Input { program_picker, .. } = &mut m else {
+            unreachable!()
+        };
+        *program_picker = Some(program_fixture(&["codex", "claude"], 0));
+        handle_input_modal_key(&mut m, key(KeyCode::Esc));
+        let Modal::Input {
+            program_picker: Some(picker),
+            ..
+        } = &m
+        else {
+            unreachable!()
+        };
+        assert_eq!(picker.choices.len(), 2);
+        assert_eq!(picker.selected_command().as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn project_search_cursor_edits_the_query_and_no_matches_cannot_be_accepted() {
+        let mut m = session_modal(Some(project_fixture(&["alpha"], 0)), None);
+        for code in [
+            KeyCode::Tab,
+            KeyCode::Char('a'),
+            KeyCode::Char('z'),
+            KeyCode::Left,
+            KeyCode::Delete,
+        ] {
+            handle_input_modal_key(&mut m, key(code));
+        }
+        let Modal::Input {
+            project_picker: Some(picker),
+            ..
+        } = &m
+        else {
+            unreachable!()
+        };
+        assert_eq!(picker.filter, "a");
+        handle_input_modal_key(&mut m, key(KeyCode::Char('z')));
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Handled
+        );
+        assert!(expanded_of(&m));
+        handle_input_modal_key(&mut m, key(KeyCode::Esc));
+        let Modal::Input {
+            project_picker: Some(picker),
+            ..
+        } = &m
+        else {
+            unreachable!()
+        };
+        assert_eq!(picker.selected_id(), picker.choices.first().map(|p| p.id));
+        assert!(picker.filter.is_empty());
+    }
+
+    #[test]
+    fn project_search_accepts_spaces_and_paste_never_edits_the_session_name() {
+        let mut m = session_modal(Some(project_fixture(&["alpha beta", "other"], 0)), None);
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        for c in "alpha beta".chars() {
+            handle_input_modal_key(&mut m, key(KeyCode::Char(c)));
+        }
+        assert!(expanded_of(&m));
+        match &m {
+            Modal::Input {
+                project_picker: Some(p),
+                ..
+            } => assert_eq!(p.filter, "alpha beta"),
+            _ => unreachable!(),
+        }
+        apply_paste_to_modal(&mut m, " pasted");
+        match &m {
+            Modal::Input {
+                value,
+                project_picker: Some(p),
+                ..
+            } => {
+                assert_eq!(value.value(), "");
+                assert_eq!(p.filter, "alpha beta pasted");
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

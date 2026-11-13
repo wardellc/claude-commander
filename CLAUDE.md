@@ -77,6 +77,8 @@ For every bug fix or behaviour change: (1) write a failing test that reproduces 
 
 ## Coding conventions
 
+**Dialog and input conventions:** follow [docs/input-interactions.md](docs/input-interactions.md) when adding or changing controls. Reuse shared choice/text handling, preserve nested accept/cancel semantics, and add regression tests for cycling, cancellation, search and paste.
+
 - Minimise duplication: extract shared logic into helpers or existing utility functions rather than repeating code across modules
 - Use idiomatic Rust patterns: leverage the type system, enums, pattern matching, iterators, and the `?` operator; prefer `impl Into<T>` / `AsRef<T>` over concrete types in function signatures where it improves ergonomics
 - Follow the existing error handling style: `thiserror` derive macros for error enums, `Result<T>` alias from `error.rs`

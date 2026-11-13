@@ -1121,7 +1121,7 @@ impl App {
         } else if state.editing.is_some() {
             match &state.editing {
                 Some(SettingsEditing::OptionPicker { .. }) => {
-                    "j/k: navigate  Enter: select  Esc: cancel"
+                    "↑↓ highlight  Space/Enter: select  Esc: cancel"
                 }
                 Some(SettingsEditing::Colour { picker }) => picker.footer_hint(),
                 _ => "Enter: save  Esc: cancel",
@@ -1129,9 +1129,9 @@ impl App {
         } else if state.tab == SettingsTab::Keybindings {
             "Tab: switch tab  j/k: navigate  /: search  Esc: close"
         } else if selected_is_toggle {
-            "Tab: switch tab  j/k: navigate  Space/Enter: toggle  Esc: close"
+            "Tab: tabs  ↑↓: field  ←→/Space: toggle  Enter/Esc: close"
         } else {
-            "Tab: switch tab  j/k: navigate  Enter: edit  Esc: close"
+            "Tab: tabs  ↑↓: field  ←→: change  Space: edit  Enter/Esc: close"
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -1350,8 +1350,50 @@ impl App {
             }
         }
 
+        if let Some(SectionsEditing::Choices(choice)) = &sec.editing {
+            let visible = usize::from(pred_area.height.saturating_sub(1)).max(1);
+            let start = super::actions::adjust_list_scroll(choice.highlighted, 0, visible);
+            let label = sections
+                .get(sec.selected_section)
+                .map(|section| predicate_rows(section)[sec.pred_selected].0.clone())
+                .unwrap_or_default();
+            let mut lines = vec![Line::from(label)];
+            lines.extend(
+                choice
+                    .options
+                    .iter()
+                    .zip(&choice.checked)
+                    .enumerate()
+                    .skip(start)
+                    .take(visible)
+                    .map(|(index, (option, checked))| {
+                        let marker = if choice.multiple {
+                            if *checked { "[x]" } else { "[ ]" }
+                        } else if *checked {
+                            "(o)"
+                        } else {
+                            "( )"
+                        };
+                        Line::styled(
+                            format!("{marker} {}", option.label),
+                            if index == choice.highlighted {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                            },
+                        )
+                    }),
+            );
+            frame.render_widget(Clear, pred_area);
+            frame.render_widget(Paragraph::new(lines), pred_area);
+        }
+
         // --- Footer ---
         let footer_text = match &sec.editing {
+            Some(SectionsEditing::Choices(choice)) if choice.multiple => {
+                "↑↓: highlight  Space: check/uncheck  Enter: accept  Esc: cancel"
+            }
+            Some(SectionsEditing::Choices(_)) => "↑↓: highlight  Space/Enter: select  Esc: cancel",
             Some(
                 SectionsEditing::RenamingSection { .. } | SectionsEditing::EditingPredicate { .. },
             ) => "Enter: save  Esc: cancel",
@@ -1359,7 +1401,7 @@ impl App {
             None if sec.focus == SectionsFocus::List => {
                 "n: new  r: rename  d: delete  J/K: reorder  →/Enter: predicates  Tab: switch tab"
             }
-            None => "Enter: edit  ←: back to list  Tab: switch tab",
+            None => "Space: edit/list  ←→: cycle single choice  Enter: finish  Esc: back",
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -1931,6 +1973,136 @@ impl App {
         }
     }
 
+    async fn accept_settings_option(&mut self, state: &mut SettingsState, value: String) {
+        let value = if value == "(auto)" {
+            String::new()
+        } else {
+            value
+        };
+        let Some(row) = state.rows.get(state.selected_row) else {
+            return;
+        };
+        let field_key = row.field_key.clone();
+        state.editing = None;
+        if state.tab == SettingsTab::Theme {
+            if field_key == "theme_scope" {
+                if let Some(scope) = parse_theme_scope(&value) {
+                    state.theme_scope = scope;
+                }
+            } else if let Some(scope) = self.theme_pick_scope(&state.theme_scope) {
+                self.apply_theme_edit(&scope, &field_key, &value);
+            }
+        } else {
+            let previous_device = self.config.stt.input_device.clone();
+            self.apply_settings_edit_live(state.tab, &field_key, &value)
+                .await;
+            if field_key == "stt_input_device" && self.config.stt.input_device != previous_device {
+                self.respawn_listener();
+            }
+        }
+        state.rows = self.settings_rows(state);
+        state.selected_row = state.selected_row.min(state.rows.len().saturating_sub(1));
+    }
+
+    fn open_settings_edit(&mut self, state: &mut SettingsState) {
+        if state.tab == SettingsTab::Theme {
+            self.theme_row_enter(state);
+            return;
+        }
+        if !state.rows.is_empty() {
+            let field_key = &state.rows[state.selected_row].field_key;
+            if field_key == "editor_gui" {
+                let options: Vec<_> = ["(auto)", "true", "false"]
+                    .into_iter()
+                    .map(PickerOption::plain)
+                    .collect();
+                let selected = options
+                    .iter()
+                    .position(|option| option.value == state.rows[state.selected_row].text_value())
+                    .unwrap_or(0);
+                state.editing = Some(SettingsEditing::OptionPicker { options, selected });
+            } else if field_key == "code_host_provider" {
+                let options = code_host_options();
+                let selected = usize::from(
+                    self.config.code_host_provider
+                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+                );
+                state.editing = Some(SettingsEditing::OptionPicker { options, selected });
+            } else if field_key == "conversation_speak_scope" {
+                // Inline option picker for the speak-scope enum.
+                use claude_commander_core::conversation::SpeakScope;
+                let options: Vec<PickerOption> = SpeakScope::ALL
+                    .iter()
+                    .map(|s| PickerOption::plain(s.label()))
+                    .collect();
+                let current_value = state.rows[state.selected_row].text_value();
+                let selected = options
+                    .iter()
+                    .position(|o| o.value == current_value)
+                    .unwrap_or(0);
+                state.editing = Some(SettingsEditing::OptionPicker { options, selected });
+            } else if field_key == "stt_dictation_submit" {
+                // Inline option picker for the dictation submit
+                // policy — three named values, so a picker
+                // rather than free text (same shape as the
+                // speak-scope row above).
+                use claude_commander_core::conversation::DictationSubmit;
+                let options: Vec<PickerOption> = DictationSubmit::ALL
+                    .iter()
+                    .map(|s| PickerOption::plain(s.label()))
+                    .collect();
+                let current_value = state.rows[state.selected_row].text_value();
+                let selected = options
+                    .iter()
+                    .position(|o| o.value == current_value)
+                    .unwrap_or(0);
+                state.editing = Some(SettingsEditing::OptionPicker { options, selected });
+            } else if field_key == "stt_input_device" {
+                // Inline option picker for the microphone: each entry
+                // shows a friendly label but commits the stable device
+                // id. "(default)" comes first for the system default.
+                // Refresh the device cache so the list is current.
+                self.refresh_input_devices();
+                let mut options = vec![PickerOption::plain("(default)")];
+                options.extend(self.stt_input_devices.iter().map(|d| PickerOption {
+                    label: d.label.clone(),
+                    value: d.id.clone(),
+                }));
+                // Preselect by the stored device id (the row shows
+                // the friendly label, so read config directly).
+                let current_id = self
+                    .config
+                    .stt
+                    .input_device
+                    .clone()
+                    .unwrap_or_else(|| "(default)".into());
+                // Keep a configured-but-unplugged device selectable so
+                // opening the picker doesn't silently reset it.
+                if current_id != "(default)" && !options.iter().any(|o| o.value == current_id) {
+                    options.push(PickerOption {
+                        label: format!("{current_id} (not connected)"),
+                        value: current_id.clone(),
+                    });
+                }
+                let selected = options
+                    .iter()
+                    .position(|o| o.value == current_id)
+                    .unwrap_or(0);
+                state.editing = Some(SettingsEditing::OptionPicker { options, selected });
+            } else {
+                let current_value = state.rows[state.selected_row].text_value();
+                let initial = if current_value == "(auto)" || current_value == "(none)" {
+                    String::new()
+                } else {
+                    current_value.to_string()
+                };
+                state.editing = Some(SettingsEditing::TextInput {
+                    value: initial.into(),
+                });
+            }
+        }
+    }
+
     /// Handle a keypress in the settings modal.
     pub(super) async fn handle_settings_key(
         &mut self,
@@ -2058,46 +2230,11 @@ impl App {
                     self.ui_state.modal = Modal::Settings(state);
                 }
                 SettingsEditing::OptionPicker { options, selected } => match key.code {
-                    KeyCode::Enter => {
-                        // Commit the entry's value (the display label and stored
-                        // value differ only for the mic picker's device ids).
-                        let chosen = options[*selected].value.clone();
-                        let field_key = state.rows[state.selected_row].field_key.clone();
-                        // Treat "(auto)" as empty string for apply_settings_edit
-                        let val = if chosen == "(auto)" {
-                            String::new()
-                        } else {
-                            chosen
-                        };
-                        state.editing = None;
-                        if state.tab == SettingsTab::Theme {
-                            if field_key == "theme_scope" {
-                                if let Some(scope) = parse_theme_scope(&val) {
-                                    state.theme_scope = scope;
-                                }
-                            } else if let Some(scope) = self.theme_pick_scope(&state.theme_scope) {
-                                self.apply_theme_edit(&scope, &field_key, &val);
-                            }
-                            state.rows = self.settings_rows(&state);
-                            state.selected_row =
-                                state.selected_row.min(state.rows.len().saturating_sub(1));
-                            self.ui_state.modal = Modal::Settings(state);
-                            return;
+                    KeyCode::Enter | KeyCode::Char(' ') if key.modifiers.is_empty() => {
+                        if let Some(option) = options.get(*selected) {
+                            let value = option.value.clone();
+                            self.accept_settings_option(&mut state, value).await;
                         }
-                        let prev_input_device = self.config.stt.input_device.clone();
-                        self.apply_settings_edit_live(state.tab, &field_key, &val)
-                            .await;
-                        // Selecting a *different* microphone rebuilds the running
-                        // listener so the new device is used on the next recording,
-                        // live. Skip the respawn when the id is unchanged (e.g.
-                        // re-picking the current device) to avoid a needless
-                        // teardown / re-open of the same device.
-                        if field_key == "stt_input_device"
-                            && self.config.stt.input_device != prev_input_device
-                        {
-                            self.respawn_listener();
-                        }
-                        state.rows = self.settings_rows(&state);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Esc => {
@@ -2105,15 +2242,11 @@ impl App {
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        *selected = (*selected + 1) % options.len();
+                        *selected = super::cycle_choice(*selected, options.len(), true);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        *selected = if *selected == 0 {
-                            options.len() - 1
-                        } else {
-                            *selected - 1
-                        };
+                        *selected = super::cycle_choice(*selected, options.len(), false);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     _ => {
@@ -2127,10 +2260,11 @@ impl App {
 
             // Boolean rows flip in place on Enter/Space/Left/Right without
             // opening an editor.
-            let toggle_key = matches!(
-                key.code,
-                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
-            );
+            let toggle_key = key.modifiers.is_empty()
+                && matches!(
+                    key.code,
+                    KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+                );
             let new_val = toggle_key
                 .then(|| {
                     state
@@ -2171,100 +2305,51 @@ impl App {
                         self.switch_settings_tab(&mut state, false);
                         self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Enter if state.tab == SettingsTab::Theme => {
-                        self.theme_row_enter(&mut state);
+                    KeyCode::Enter => self.ui_state.modal = Modal::None,
+                    KeyCode::Char(' ') if key.modifiers.is_empty() => {
+                        self.open_settings_edit(&mut state);
                         self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Enter => {
-                        if !state.rows.is_empty() {
-                            let field_key = &state.rows[state.selected_row].field_key;
-                            if field_key == "code_host_provider" {
-                                let options = code_host_options();
-                                let selected = usize::from(
-                                    self.config.code_host_provider
-                                        == claude_commander_protocol::hosting::CodeHostProvider::Gitlab,
+                    KeyCode::Left | KeyCode::Right if key.modifiers.is_empty() => {
+                        if state.tab == SettingsTab::General
+                            && state
+                                .rows
+                                .get(state.selected_row)
+                                .is_some_and(|row| row.field_key == "code_host_provider")
+                        {
+                            // Resolve a relative step inside the service's serialized
+                            // edit, so rapid arrows cannot read the same stale value.
+                            self.spawn_code_host_edit(|config| {
+                                use claude_commander_protocol::hosting::CodeHostProvider;
+                                config.code_host_provider = match config.code_host_provider {
+                                    CodeHostProvider::Github => CodeHostProvider::Gitlab,
+                                    CodeHostProvider::Gitlab => CodeHostProvider::Github,
+                                };
+                            });
+                            self.ui_state.modal = Modal::Settings(state);
+                            return;
+                        }
+                        let can_cycle = state.tab != SettingsTab::Theme
+                            || state.rows.get(state.selected_row).is_some_and(|r| {
+                                matches!(
+                                    r.field_key.as_str(),
+                                    "theme_scope" | "preset" | "appearance"
+                                )
+                            });
+                        if can_cycle {
+                            self.open_settings_edit(&mut state);
+                            if let Some(SettingsEditing::OptionPicker { options, selected }) =
+                                state.editing.take()
+                            {
+                                let next = super::cycle_choice(
+                                    selected,
+                                    options.len(),
+                                    key.code == KeyCode::Right,
                                 );
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if field_key == "conversation_speak_scope" {
-                                // Inline option picker for the speak-scope enum.
-                                use claude_commander_core::conversation::SpeakScope;
-                                let options: Vec<PickerOption> = SpeakScope::ALL
-                                    .iter()
-                                    .map(|s| PickerOption::plain(s.label()))
-                                    .collect();
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_value)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if field_key == "stt_dictation_submit" {
-                                // Inline option picker for the dictation submit
-                                // policy — three named values, so a picker
-                                // rather than free text (same shape as the
-                                // speak-scope row above).
-                                use claude_commander_core::conversation::DictationSubmit;
-                                let options: Vec<PickerOption> = DictationSubmit::ALL
-                                    .iter()
-                                    .map(|s| PickerOption::plain(s.label()))
-                                    .collect();
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_value)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else if field_key == "stt_input_device" {
-                                // Inline option picker for the microphone: each entry
-                                // shows a friendly label but commits the stable device
-                                // id. "(default)" comes first for the system default.
-                                // Refresh the device cache so the list is current.
-                                self.refresh_input_devices();
-                                let mut options = vec![PickerOption::plain("(default)")];
-                                options.extend(self.stt_input_devices.iter().map(|d| {
-                                    PickerOption {
-                                        label: d.label.clone(),
-                                        value: d.id.clone(),
-                                    }
-                                }));
-                                // Preselect by the stored device id (the row shows
-                                // the friendly label, so read config directly).
-                                let current_id = self
-                                    .config
-                                    .stt
-                                    .input_device
-                                    .clone()
-                                    .unwrap_or_else(|| "(default)".into());
-                                // Keep a configured-but-unplugged device selectable so
-                                // opening the picker doesn't silently reset it.
-                                if current_id != "(default)"
-                                    && !options.iter().any(|o| o.value == current_id)
-                                {
-                                    options.push(PickerOption {
-                                        label: format!("{current_id} (not connected)"),
-                                        value: current_id.clone(),
-                                    });
+                                if let Some(option) = options.get(next) {
+                                    self.accept_settings_option(&mut state, option.value.clone())
+                                        .await;
                                 }
-                                let selected = options
-                                    .iter()
-                                    .position(|o| o.value == current_id)
-                                    .unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
-                            } else {
-                                let current_value = state.rows[state.selected_row].text_value();
-                                let initial =
-                                    if current_value == "(auto)" || current_value == "(none)" {
-                                        String::new()
-                                    } else {
-                                        current_value.to_string()
-                                    };
-                                state.editing = Some(SettingsEditing::TextInput {
-                                    value: initial.into(),
-                                });
                             }
                         }
                         self.ui_state.modal = Modal::Settings(state);
@@ -2280,6 +2365,22 @@ impl App {
     /// Handle a keypress while the Keybindings search box is focused. Typing
     /// filters the shortcut list live; arrows navigate the matches; `Enter`
     /// keeps the filter and returns to browsing; `Esc` clears it.
+    pub(super) fn refilter_settings_search(&mut self) {
+        let Modal::Settings(state) = &self.ui_state.modal else {
+            return;
+        };
+        let Some(query) = &state.search else {
+            return;
+        };
+        let query = query.value().to_string();
+        let rows =
+            filter_keybinding_rows(self.build_settings_rows(SettingsTab::Keybindings), &query);
+        if let Modal::Settings(state) = &mut self.ui_state.modal {
+            state.rows = rows;
+            state.selected_row = first_selectable_from(&state.rows, 0);
+        }
+    }
+
     fn handle_keybinding_search_key(
         &mut self,
         key: crossterm::event::KeyEvent,
@@ -2333,6 +2434,22 @@ impl App {
         // --- Editing mode ---
         if let Some(ref mut editing) = sec.editing {
             match editing {
+                SectionsEditing::Choices(choice) => {
+                    match choice.handle_key(key) {
+                        super::choice::ChoiceOutcome::Open => {}
+                        super::choice::ChoiceOutcome::Cancel => sec.editing = None,
+                        super::choice::ChoiceOutcome::Accept(value) => {
+                            let index = sec.selected_section;
+                            let predicate = sec.pred_selected;
+                            if let Some(section) = self.config.sections.get_mut(index) {
+                                apply_predicate_edit(section, predicate, &value);
+                                self.save_sections_config().await;
+                            }
+                            state.sections_state.editing = None;
+                        }
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
                 SectionsEditing::RenamingSection { value } => match key.code {
                     KeyCode::Enter => {
                         let new_name = value.value().trim().to_string();
@@ -2544,7 +2661,7 @@ impl App {
                         self.ui_state.modal = Modal::None;
                     }
                     _ => match key.code {
-                        KeyCode::Esc | KeyCode::Left => {
+                        KeyCode::Esc => {
                             sec.focus = SectionsFocus::List;
                             self.ui_state.modal = Modal::Settings(state);
                         }
@@ -2556,7 +2673,36 @@ impl App {
                             self.switch_settings_tab(&mut state, false);
                             self.ui_state.modal = Modal::Settings(state);
                         }
-                        KeyCode::Enter => {
+                        KeyCode::Enter => self.ui_state.modal = Modal::None,
+                        KeyCode::Left | KeyCode::Right
+                            if key.modifiers.is_empty() && matches!(sec.pred_selected, 1 | 3) =>
+                        {
+                            if let Some(section) =
+                                self.config.sections.get_mut(sec.selected_section)
+                            {
+                                let current = predicate_rows(section)[sec.pred_selected].1.clone();
+                                if let Some(choice) = predicate_choice(sec.pred_selected, &current)
+                                {
+                                    let next = super::cycle_choice(
+                                        choice.highlighted,
+                                        choice.options.len(),
+                                        key.code == KeyCode::Right,
+                                    );
+                                    apply_predicate_edit(
+                                        section,
+                                        sec.pred_selected,
+                                        &choice.options[next].value,
+                                    );
+                                    self.save_sections_config().await;
+                                }
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Left => {
+                            sec.focus = SectionsFocus::List;
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char(' ') => {
                             if sec.selected_section < sections_len && pred_count > 0 {
                                 let rows =
                                     predicate_rows(&self.config.sections[sec.selected_section]);
@@ -2566,9 +2712,17 @@ impl App {
                                 } else {
                                     current_val.clone()
                                 };
-                                sec.editing = Some(SectionsEditing::EditingPredicate {
-                                    value: initial.into(),
-                                });
+                                sec.editing = Some(
+                                    if let Some(choice) =
+                                        predicate_choice(sec.pred_selected, &initial)
+                                    {
+                                        SectionsEditing::Choices(choice)
+                                    } else {
+                                        SectionsEditing::EditingPredicate {
+                                            value: initial.into(),
+                                        }
+                                    },
+                                );
                             }
                             self.ui_state.modal = Modal::Settings(state);
                         }
@@ -2956,7 +3110,9 @@ impl App {
                     KeyCode::Esc | KeyCode::Left => prog.focus = ProgramsFocus::List,
                     KeyCode::Tab => switch_tab = Some(true),
                     KeyCode::BackTab => switch_tab = Some(false),
-                    KeyCode::Enter if editable && prog.selected < programs_len => {
+                    KeyCode::Enter | KeyCode::Char(' ')
+                        if editable && prog.selected < programs_len =>
+                    {
                         let entry = &prog.entries[prog.selected];
                         let current = if prog.field_selected == 0 {
                             entry.label.clone()
@@ -3336,7 +3492,9 @@ impl App {
                     "n: new  r: rename  d: delete  J/K: reorder  →/Enter: fields{switch}  Tab: tab"
                 )
             }
-            None => "Enter: edit  ←: back to list  Tab: switch tab".to_string(),
+            None => {
+                "Space: edit/list  ←→: cycle single choice  Enter: finish  Esc: back".to_string()
+            }
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -3365,6 +3523,44 @@ fn unique_program_label(programs: &[claude_commander_core::config::ProgramEntry]
 }
 
 /// Build displayable rows for a section's predicates.
+/// Finite predicates get choice controls; labels and reviewer logins remain text.
+fn predicate_choice(index: usize, current: &str) -> Option<super::choice::ChoiceList> {
+    let (values, multiple): (&[&str], bool) = match index {
+        0 => (&["open", "merged", "closed"], true),
+        1 | 3 => (&["", "true", "false"], false),
+        4 => (&["approved", "changes_requested", "review_required"], true),
+        7 => (
+            &[
+                "unapproved",
+                "needs_code_owner",
+                "needs_approvals",
+                "approved",
+                "not_required",
+                "blocked",
+                "unknown",
+            ],
+            true,
+        ),
+        _ => return None,
+    };
+    let options = values
+        .iter()
+        .map(|&value| PickerOption {
+            label: if value.is_empty() {
+                "(not set)".into()
+            } else {
+                value.replace('_', " ")
+            },
+            value: value.into(),
+        })
+        .collect();
+    Some(super::choice::ChoiceList::new(
+        options,
+        if current == "(not set)" { "" } else { current },
+        multiple,
+    ))
+}
+
 fn predicate_rows(
     section: &claude_commander_core::session::SectionConfig,
 ) -> Vec<(String, String)> {

@@ -230,6 +230,12 @@ When automatic project-branch pulling is enabled (see `project_pull_enabled` in 
 
 ### Keyboard Shortcuts
 
+In forms, Left/Right cycles choices (or toggles booleans), Space opens a choice
+list, and Up/Down highlights an option. Space/Enter accepts an open list; Escape
+restores its opening value. Enter saves the form once the list is closed.
+See [Dialog and input interactions](docs/input-interactions.md) for the full
+conventions, including searchable choices and Settings.
+
 All keybindings below are defaults and can be customised via the `[keybindings]` config table (see [Configuration](docs/configuration.md)).
 
 The status bar surfaces the most useful actions as clickable buttons, with the hotkey letter bracketed (`[n]ew session`, `[d]elete`); the review view's footer works the same way. Clicking a button fires the same action as its key, so the hotkeys below can also be discovered and triggered with the mouse.
