@@ -2072,6 +2072,7 @@ impl AppUiState {
             | BindableAction::ChangeProgram
             | BindableAction::SetSessionBase
             | BindableAction::ToggleKeepAlive
+            | BindableAction::OpenJiraTicket
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff
             | BindableAction::OpenInfo

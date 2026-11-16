@@ -75,6 +75,9 @@ impl RestartKind {
 /// State updates from background tasks
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
+    JiraTicketReady {
+        result: Result<String, String>,
+    },
     SessionEditOptionsLoaded {
         session: claude_commander_core::backend::SessionRef,
         result: Result<claude_commander_protocol::api::CreateOptions, String>,
@@ -83,16 +86,22 @@ pub enum StateUpdate {
         result: std::result::Result<(), String>,
     },
     /// Periodic config reload completed without holding up input/rendering.
-    ConfigReloaded { result: Result<bool, String> },
+    ConfigReloaded {
+        result: Result<bool, String>,
+    },
     /// Session content updated
     ContentUpdated {
         session_id: SessionId,
         content_hash: u64,
     },
     /// Session status changed
-    StatusChanged { session_id: SessionId },
+    StatusChanged {
+        session_id: SessionId,
+    },
     /// Diff updated
-    DiffUpdated { session_id: SessionId },
+    DiffUpdated {
+        session_id: SessionId,
+    },
     /// A project was registered on `backend_id` from a background task (the
     /// "register the existing checkout" answer to an occupied clone
     /// destination). The handler refreshes that backend's view and the tree.
@@ -102,11 +111,17 @@ pub enum StateUpdate {
         project_id: ProjectId,
     },
     /// Session added
-    SessionAdded { session_id: SessionId },
+    SessionAdded {
+        session_id: SessionId,
+    },
     /// Session removed
-    SessionRemoved { session_id: SessionId },
+    SessionRemoved {
+        session_id: SessionId,
+    },
     /// Error occurred
-    Error { message: String },
+    Error {
+        message: String,
+    },
     ActionFinished {
         backend_id: usize,
         message: Result<String, String>,
@@ -121,7 +136,9 @@ pub enum StateUpdate {
     },
     /// Session creation failed. The backend removes its own half-created
     /// (`Creating`) session on failure, so this carries only the message.
-    SessionCreateFailed { message: String },
+    SessionCreateFailed {
+        message: String,
+    },
     /// Result of the add-remote-server connection probe. `Ok(tmux_ok)` means
     /// the server answered a workspace-snapshot request (reachable + auth
     /// accepted); the flag carries its tmux health for the success toast.
@@ -341,7 +358,9 @@ pub enum StateUpdate {
     },
     /// A background `git lfs pull` for a freshly-created session finished
     /// (success or failure), so its `⇣ LFS` row marker can be cleared.
-    LfsPullFinished { session_id: SessionId },
+    LfsPullFinished {
+        session_id: SessionId,
+    },
     /// Review diff prepared off-thread: the parsed diff plus its warmed render
     /// caches (word-diff segments + syntax highlighting), ready to replace the
     /// loading spinner with the full review view. Boxed — the payload is large.
@@ -352,7 +371,9 @@ pub enum StateUpdate {
     /// viewable diff: `None` means the session has no changes (a status toast),
     /// `Some(err)` means the fetch failed (an error modal). Distinct from
     /// [`ReviewPrepared`](Self::ReviewPrepared), which carries a ready view.
-    ReviewOpenFailed { error: Option<String> },
+    ReviewOpenFailed {
+        error: Option<String>,
+    },
     /// A binary review image finished loading off-thread: decoded bytes for one
     /// side of one file, ready to build a render protocol from (on the main
     /// thread, which owns the `Picker`). `Arc` keeps the enum cheap to clone.
@@ -466,6 +487,8 @@ pub enum UserCommand {
     OpenInfo,
     /// Open the selected session's PR URL in a web browser
     OpenPullRequest,
+    /// Open the Jira ticket associated with the selected session.
+    OpenJiraTicket,
     /// Force an immediate PR-status re-check for all sessions (palette-only)
     RefreshPrStatus,
     /// Add a remote server: chained name/URL/token inputs + connection test (palette-only)
@@ -641,6 +664,7 @@ impl UserCommand {
             UserCommand::OpenInEditor => Some("editor.open"),
             UserCommand::OpenInfo => Some("ui.open_info"),
             UserCommand::OpenPullRequest => Some("pr.open"),
+            UserCommand::OpenJiraTicket => Some("jira.open"),
             UserCommand::RefreshPrStatus => Some("pr.refresh_status"),
             UserCommand::AddRemoteServer => Some("server.add_remote"),
             UserCommand::RemoveRemoteServer => Some("server.remove_remote"),
@@ -716,6 +740,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenInfo => Self::OpenInfo,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
+            BindableAction::OpenJiraTicket => Self::OpenJiraTicket,
             BindableAction::RefreshPrStatus => Self::RefreshPrStatus,
             BindableAction::OpenCommander => Self::OpenCommander,
             BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
@@ -1248,11 +1273,11 @@ mod tests {
     fn test_key_to_command() {
         let b = kb();
 
-        // Navigation
+        // Jira shortcut
         let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
         assert!(matches!(
             UserCommand::from_key(key, &b),
-            Some(UserCommand::NavigateDown)
+            Some(UserCommand::OpenJiraTicket)
         ));
 
         let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
@@ -1458,6 +1483,11 @@ mod tests {
                 KeyCode::Char('o'),
                 KeyModifiers::NONE,
                 UserCommand::OpenPullRequest,
+            ),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                UserCommand::OpenJiraTicket,
             ),
             (
                 KeyCode::Char('r'),

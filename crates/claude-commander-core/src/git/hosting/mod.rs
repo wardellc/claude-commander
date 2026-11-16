@@ -91,7 +91,7 @@ pub fn stack_instruction(provider: CodeHostProvider, parent_branch: &str) -> Str
     }
 }
 
-/// Retargets are best-effort; bound both the CLI and any child processes.
+/// Bound hosted-review commands and clean up their process trees on cancellation.
 pub(crate) async fn review_output(
     command: tokio::process::Command,
     program: &str,
@@ -108,7 +108,7 @@ pub(crate) async fn review_output(
         }),
         super::bounded::Bounded::TimedOut => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            "review retarget timed out",
+            "review command timed out",
         )),
     }
 }

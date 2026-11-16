@@ -15,8 +15,8 @@ pub async fn is_available() -> bool {
     available_from(cmd).await
 }
 
-async fn available_from(mut cmd: Command) -> bool {
-    cmd.output()
+async fn available_from(cmd: Command) -> bool {
+    super::review_output(cmd, "glab version")
         .await
         .is_ok_and(|output| output.status.success())
 }
@@ -199,10 +199,12 @@ pub async fn check_review_for_branch(
     branch: &str,
     branch_owned_since: DateTime<Utc>,
 ) -> PrCheckResult {
-    let output = match merge_requests_command(repo_path, branch).output().await {
-        Ok(output) if output.status.success() => output,
-        _ => return PrCheckResult::FetchFailed,
-    };
+    let output =
+        match super::review_output(merge_requests_command(repo_path, branch), "glab mr list").await
+        {
+            Ok(output) if output.status.success() => output,
+            _ => return PrCheckResult::FetchFailed,
+        };
     let Ok(json) = String::from_utf8(output.stdout) else {
         return PrCheckResult::FetchFailed;
     };
@@ -276,6 +278,7 @@ fn parse_merge_request(value: &serde_json::Value) -> Option<PrInfo> {
     reviewers.sort();
     reviewers.dedup();
     Some(PrInfo {
+        title: value["title"].as_str().map(str::to_owned),
         approval_summary: None,
         head_sha: value["sha"].as_str().map(str::to_owned),
         number,
@@ -645,6 +648,19 @@ mod tests {
         assert_eq!(info.reviewers, ["alice", "bob"]);
         assert_eq!(info.base_ref_name.as_deref(), Some("parent"));
         assert_eq!(info.review_decision, None);
+    }
+
+    #[test]
+    fn jira_title_is_preserved_from_merge_request() {
+        let result = parse_merge_request_list(
+            r#"[{"source_branch":"feat","iid":1,"title":"ABC-123 review","web_url":"u","state":"opened"}]"#,
+            "feat",
+            Utc::now(),
+        );
+        assert_eq!(
+            result.info().unwrap().title.as_deref(),
+            Some("ABC-123 review")
+        );
     }
 
     #[test]

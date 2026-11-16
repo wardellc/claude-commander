@@ -190,6 +190,10 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn jira_reference(&self, _id: SessionId) -> BResult<Option<String>> {
+        self.unavailable()
+    }
+
     async fn mark_unread(&self, _ids: Vec<SessionId>) -> BResult<()> {
         self.unavailable()
     }

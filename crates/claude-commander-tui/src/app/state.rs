@@ -255,6 +255,10 @@ impl App {
                     debug!("Discarding stale PreviewReady (selection changed)");
                 }
             }
+            StateUpdate::JiraTicketReady { result } => match result {
+                Ok(url) => self.open_browser(&url, "Jira ticket"),
+                Err(message) => self.ui_state.modal = Modal::Error { message },
+            },
             StateUpdate::EnrichedPrReady {
                 spawned_at,
                 session_id,

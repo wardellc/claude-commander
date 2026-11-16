@@ -14680,3 +14680,100 @@ fn startup_program_discovery_survives_a_settings_save() {
     let on_disk = std::fs::read_to_string(&config_path).unwrap();
     assert!(on_disk.contains("muse-code"), "{on_disk}");
 }
+
+#[tokio::test]
+async fn jira_shortcut_requires_hostname_and_missing_ticket_shows_dialog() {
+    use claude_commander_core::session::{Project, WorktreeSession};
+    let mut app = make_test_app();
+    let dir = tempfile::TempDir::new().unwrap();
+    let project = Project::new("repo", dir.path().join("repo"), "main");
+    let session = WorktreeSession::new(
+        project.id,
+        "No ticket",
+        "no-ticket",
+        dir.path().join("wt"),
+        "claude",
+    );
+    let sid = session.id;
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(project);
+            state.add_session(session);
+        })
+        .await
+        .unwrap();
+    app.ui_state.selected_session_id = Some(claude_commander_core::backend::SessionRef {
+        backend: claude_commander_core::backend::LOCAL_BACKEND_ID,
+        id: sid,
+    });
+    app.handle_command(UserCommand::OpenJiraTicket).await;
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message.contains("No Jira hostname"))
+    );
+    app.config.jira_hostname = Some("jira.example.com".into());
+    app.handle_command(UserCommand::OpenJiraTicket).await;
+    let update = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(AppEvent::StateUpdate(update @ StateUpdate::JiraTicketReady { .. })) =
+                app.event_loop.next().await
+            {
+                break update;
+            }
+        }
+    })
+    .await
+    .expect("ticket lookup should deliver its result");
+    app.handle_state_update(update).await;
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message.contains("Can't find a Jira reference"))
+    );
+}
+
+#[test]
+fn jira_settings_edit_validates_and_can_clear_hostname() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "jira_hostname", "jira.example.com");
+    assert_eq!(
+        app.config.jira_hostname.as_deref(),
+        Some("jira.example.com")
+    );
+    app.apply_settings_edit(
+        SettingsTab::General,
+        "jira_hostname",
+        "https://user:secret@jira.example.com",
+    );
+    assert_eq!(
+        app.config.jira_hostname.as_deref(),
+        Some("jira.example.com")
+    );
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message.contains("Invalid Jira hostname") && !message.contains("secret"))
+    );
+    app.apply_settings_edit(SettingsTab::General, "jira_hostname", "");
+    assert!(app.config.jira_hostname.is_none());
+}
+
+#[tokio::test]
+async fn jira_hostname_validation_dialog_survives_settings_editor_submit() {
+    let mut app = make_test_app();
+    open_general_settings_on(&mut app, "jira_hostname");
+    let Modal::Settings(mut state) = std::mem::replace(&mut app.ui_state.modal, Modal::None) else {
+        panic!("expected settings");
+    };
+    state.editing = Some(SettingsEditing::TextInput {
+        value: tui_input::Input::new("https://user:secret@jira.example.com".into()),
+    });
+    app.handle_settings_key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        state,
+    )
+    .await;
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Error { message } if message.contains("Invalid Jira hostname") && !message.contains("secret"))
+    );
+    assert!(app.config.jira_hostname.is_none());
+}

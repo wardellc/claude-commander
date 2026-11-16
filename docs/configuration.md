@@ -146,6 +146,14 @@ code_host_provider = "github" # "github" or "gitlab"
 # run inside each checkout so glab resolves that repository's authenticated host.
 # gitlab_hostname = "gitlab.example.com"
 
+# Jira host for the session-list j shortcut. Hostname and optional port only;
+# links use HTTPS. The first ticket matching [A-Za-z]{3,}-[0-9]+ is used,
+# searching the PR/MR title, session name, then branch. Pressing j refreshes
+# review metadata first (up to 10 seconds); failed or timed-out refreshes
+# preserve the last cached title and fall back to the session name or branch.
+# References are normalized to uppercase. Missing references show a dialog.
+# jira_hostname = "jira.example.com"
+
 # Timeout (seconds) for listing repositories in the clone picker. GitHub runs
 # `gh api --paginate`; GitLab runs `glab api ... --paginate`. Default 90. Raise
 # it if a very large account times

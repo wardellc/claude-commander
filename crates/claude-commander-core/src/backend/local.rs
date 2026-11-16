@@ -343,6 +343,10 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.mark_read(&id).await?)
     }
 
+    async fn jira_reference(&self, id: SessionId) -> BResult<Option<String>> {
+        Ok(self.service.jira_reference(&id).await?)
+    }
+
     async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool> {
         Ok(self.service.toggle_keep_alive(&id).await?)
     }

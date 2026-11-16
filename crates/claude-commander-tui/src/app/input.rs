@@ -6,6 +6,22 @@ use super::*;
 /// render pass clamps against the real content-area height each frame.
 const HELP_PAGE: u16 = 10;
 
+/// Keep j as down-navigation in modal lists while the session list uses it for Jira.
+pub(super) fn modal_key_action(
+    key: &crossterm::event::KeyEvent,
+    bindings: &claude_commander_core::config::keybindings::KeyBindings,
+) -> Option<claude_commander_core::config::keybindings::BindableAction> {
+    use claude_commander_core::config::keybindings::BindableAction;
+    match bindings.resolve(key) {
+        Some(BindableAction::OpenJiraTicket)
+            if key.code == crossterm::event::KeyCode::Char('j') && key.modifiers.is_empty() =>
+        {
+            Some(BindableAction::NavigateDown)
+        }
+        action => action,
+    }
+}
+
 /// A scroll/close action shared by the read-only scrolling modals (Help and
 /// Info). Both classifiers map their keys onto this, and
 /// [`apply_scroll_action`] applies it uniformly.
@@ -364,8 +380,8 @@ pub(super) fn opens_palette(
 }
 
 /// Plain printable characters (no modifier, or Shift only) belong in a
-/// fuzzy-search query box and must not be intercepted by global j/k →
-/// NavigateUp/Down bindings. Other key combos (Ctrl/Alt, arrows, Tab, …)
+/// fuzzy-search query box and must not be intercepted by global shortcuts.
+/// Other key combos (Ctrl/Alt, arrows, Tab, …)
 /// return `None` and fall through to the configurable resolver.
 fn palette_text_char(key: &crossterm::event::KeyEvent) -> Option<char> {
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -1071,7 +1087,7 @@ impl App {
 
                 // Arrow keys (and Ctrl-n/p aliases) navigate the completion
                 // list via the configurable resolver.
-                match self.config.keybindings.resolve(&key) {
+                match modal_key_action(&key, &self.config.keybindings) {
                     Some(BindableAction::NavigateUp) => {
                         completer.move_selection_up();
                         if let (_, Some(idx)) = completer.visible_completions() {
@@ -1206,7 +1222,7 @@ impl App {
                 }
 
                 // Arrow keys (and Ctrl-n/p aliases) navigate the match list.
-                match self.config.keybindings.resolve(&key) {
+                match modal_key_action(&key, &self.config.keybindings) {
                     Some(BindableAction::NavigateUp) => {
                         if !matches.is_empty() {
                             *selected_idx = if *selected_idx == 0 {
@@ -1285,7 +1301,7 @@ impl App {
                 }
 
                 // Arrow keys (and Ctrl-n/p aliases) navigate the branch list.
-                match self.config.keybindings.resolve(&key) {
+                match modal_key_action(&key, &self.config.keybindings) {
                     Some(BindableAction::NavigateUp) => {
                         if !filtered.is_empty() {
                             *selected_idx = if *selected_idx == 0 {
@@ -2030,6 +2046,9 @@ impl App {
                 self.spawn_info_fetch();
                 self.spawn_preview_update();
             }
+            UserCommand::OpenJiraTicket => {
+                self.handle_open_jira_ticket();
+            }
             UserCommand::OpenPullRequest => {
                 self.handle_open_pull_request().await;
             }
@@ -2298,7 +2317,7 @@ mod tests {
 
     #[test]
     fn default_jk_bindings_scroll_one_line() {
-        // Default KeyBindings bind j/k to NavigateDown/NavigateUp, not scroll,
+        // Default KeyBindings bind j to Jira and k to NavigateUp, not scroll,
         // so plain j/k should NOT produce ScrollBy here — they are ignored in
         // the Help modal. This pins the current default so a future remapping
         // doesn't silently change modal behavior.

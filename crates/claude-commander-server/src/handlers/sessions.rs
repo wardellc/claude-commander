@@ -285,6 +285,15 @@ pub async fn unread(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /sessions/{id}/jira-reference` → first ticket in review title, session, branch.
+pub async fn jira_reference(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<String>>, ApiError> {
+    let id = parse_session_id(&id)?;
+    Ok(Json(state.service.jira_reference(&id).await?))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -313,6 +322,7 @@ mod tests {
             .route("/sessions/{id}/preview", get(super::preview))
             .route("/sessions/{id}/branch-diff", get(super::branch_diff))
             .route("/sessions/{id}/read", post(super::read))
+            .route("/sessions/{id}/jira-reference", get(super::jira_reference))
             .route("/sessions/unread", post(super::unread))
             .with_state(state)
     }
@@ -414,6 +424,41 @@ mod tests {
         let (status, body) = crate::handlers::test_support::send(router(state), req).await;
         assert_eq!(status, 400);
         assert!(!String::from_utf8(body).unwrap().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn jira_reference_route_returns_ticket_null_and_not_found() {
+        let dir = TempDir::new().unwrap();
+        let (state, sid) = seeded_state(&dir);
+        let url = format!("/sessions/{}/jira-reference", sid.as_uuid());
+        let (status, body) = do_get(router(state.clone()), &url).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Option<String>>(&body).unwrap(),
+            None
+        );
+        state
+            .service
+            .store()
+            .mutate(move |state| {
+                state.get_session_mut(&sid).unwrap().pr_title = Some("abc-123 review".into());
+            })
+            .await
+            .unwrap();
+        let (status, body) = do_get(router(state.clone()), &url).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Option<String>>(&body)
+                .unwrap()
+                .as_deref(),
+            Some("ABC-123")
+        );
+        let (status, _) = do_get(
+            router(state),
+            &format!("/sessions/{}/jira-reference", uuid::Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(status, 404);
     }
 
     #[tokio::test]

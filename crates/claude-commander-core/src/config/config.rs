@@ -112,6 +112,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gitlab_hostname: Option<String>,
 
+    /// Jira hostname (optional port), used by the session-list ticket shortcut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jira_hostname: Option<String>,
+
     /// Legacy default program setting. Config files are migrated to put this
     /// command first in `programs`; runtime code should use
     /// [`Config::default_session_program`] instead.
@@ -629,6 +633,7 @@ impl Default for Config {
         Self {
             code_host_provider: CodeHostProvider::default(),
             gitlab_hostname: None,
+            jira_hostname: None,
             default_program: None,
             programs: Vec::new(),
             branch_prefix: String::new(),
@@ -780,6 +785,14 @@ impl Config {
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
 
         config.validate_code_host()?;
+        if let Some(hostname) = config.jira_hostname.as_deref() {
+            crate::jira::validate_hostname(hostname).map_err(|reason| {
+                ConfigError::InvalidValue {
+                    key: "jira_hostname".into(),
+                    reason: reason.into(),
+                }
+            })?;
+        }
         config.validate_remote_servers()?;
 
         Ok(config)
@@ -1859,6 +1872,28 @@ show_session_program = false
             claude_commander_protocol::github::DEFAULT_REPO_LIST_TIMEOUT_SECS
         );
         assert!(config.projects_dir.is_none());
+    }
+
+    #[test]
+    fn jira_hostname_loads_and_survives_config_serialization() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "jira_hostname = 'jira.example.com'\n").unwrap();
+        let config = Config::load_from_path(&path).unwrap();
+        assert_eq!(config.jira_hostname.as_deref(), Some("jira.example.com"));
+        let mut config: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        config.editor = Some("vim".into());
+        let config: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(config.jira_hostname.as_deref(), Some("jira.example.com"));
+        std::fs::write(
+            &path,
+            "jira_hostname = 'https://user:secret@jira.example.com/path'\n",
+        )
+        .unwrap();
+        let error = Config::load_from_path(&path).unwrap_err().to_string();
+        assert!(error.contains("jira_hostname"));
+        assert!(!error.contains("secret"));
+        assert!(Config::default().jira_hostname.is_none());
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub use board::{
     build_board,
 };
 pub use branch_reconcile::decide_branch_reconcile;
+pub(crate) use branch_reconcile::starter_branch_continued;
 pub use lookup::{SessionLookup, find_session, find_session_exact, resolve_project_path};
 pub use manager::*;
 pub use section::{

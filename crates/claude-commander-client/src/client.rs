@@ -754,6 +754,12 @@ impl RemoteClient {
         self.post_empty_ok(self.session_url(id, &["read"])).await
     }
 
+    /// Resolve a Jira reference on the session's owning host.
+    pub async fn jira_reference(&self, id: SessionId) -> ClientResult<Option<String>> {
+        self.get_json(self.session_url(id, &["jira-reference"]))
+            .await
+    }
+
     pub async fn toggle_keep_alive(&self, id: SessionId) -> ClientResult<bool> {
         self.post_empty_json(self.session_url(id, &["keep-alive"]))
             .await

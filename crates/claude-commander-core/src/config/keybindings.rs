@@ -57,6 +57,7 @@ pub enum BindableAction {
     OpenInEditor,
     OpenInfo,
     OpenPullRequest,
+    OpenJiraTicket,
     RefreshPrStatus,
     OpenCommander,
     ToggleConversationOverlay,
@@ -134,6 +135,7 @@ impl BindableAction {
         Self::RemoveProject,
         // Pull Requests
         Self::OpenPullRequest,
+        Self::OpenJiraTicket,
         Self::RefreshPrStatus,
         Self::DeleteMergedPrSessions,
         // Remote Servers
@@ -211,6 +213,7 @@ impl BindableAction {
             Self::OpenInEditor => "open_in_editor",
             Self::OpenInfo => "open_info",
             Self::OpenPullRequest => "open_pull_request",
+            Self::OpenJiraTicket => "open_jira_ticket",
             Self::RefreshPrStatus => "refresh_pr_status",
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
@@ -282,6 +285,7 @@ impl BindableAction {
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenInfo => "Show session info",
             Self::OpenPullRequest => "Open PR in browser",
+            Self::OpenJiraTicket => "Open Jira ticket in browser",
             Self::RefreshPrStatus => "Refresh PR status",
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
@@ -359,6 +363,7 @@ impl BindableAction {
             Self::OpenInEditor => "edit",
             Self::OpenInfo => "info",
             Self::OpenPullRequest => "open PR",
+            Self::OpenJiraTicket => "Jira ticket",
             Self::RefreshPrStatus => "refresh PR",
             Self::OpenCommander => "commander",
             Self::ToggleConversationOverlay => "conversation",
@@ -432,9 +437,10 @@ impl BindableAction {
             | Self::CheckoutBranch
             | Self::ScanDirectory
             | Self::RemoveProject => "Projects",
-            Self::OpenPullRequest | Self::RefreshPrStatus | Self::DeleteMergedPrSessions => {
-                "Pull Requests"
-            }
+            Self::OpenJiraTicket
+            | Self::OpenPullRequest
+            | Self::RefreshPrStatus
+            | Self::DeleteMergedPrSessions => "Pull Requests",
             Self::AddRemoteServer | Self::RemoveRemoteServer | Self::EditServerPrograms => {
                 "Remote Servers"
             }
@@ -501,6 +507,7 @@ impl FromStr for BindableAction {
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_info" => Ok(Self::OpenInfo),
             "open_pull_request" => Ok(Self::OpenPullRequest),
+            "open_jira_ticket" => Ok(Self::OpenJiraTicket),
             "refresh_pr_status" => Ok(Self::RefreshPrStatus),
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
@@ -813,11 +820,7 @@ impl Default for KeyBindings {
         );
         bindings.insert(
             BindableAction::NavigateDown,
-            vec![
-                kb(KeyCode::Char('j'), none),
-                kb(KeyCode::Down, none),
-                kb(KeyCode::Char('n'), ctrl),
-            ],
+            vec![kb(KeyCode::Down, none), kb(KeyCode::Char('n'), ctrl)],
         );
         bindings.insert(
             BindableAction::NextGroup,
@@ -900,6 +903,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::OpenPullRequest,
             vec![kb(KeyCode::Char('o'), none)],
+        );
+        bindings.insert(
+            BindableAction::OpenJiraTicket,
+            vec![kb(KeyCode::Char('j'), none)],
         );
         bindings.insert(BindableAction::OpenInfo, vec![kb(KeyCode::Char('i'), none)]);
         bindings.insert(
@@ -1061,6 +1068,36 @@ impl<'de> Visitor<'de> for KeyBindingsVisitor {
             }
         }
 
+        // Old configs serialize the previous j/Down/Ctrl-n default in full.
+        // Migrate that exact shape when Jira uses j; customized navigation
+        // instead keeps its key and disables the new implicit Jira binding.
+        // jira_legacy_navigation_defaults_migrate_without_conflicts pins both.
+        let j = KeyBinding::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let previous_down = [
+            j.clone(),
+            KeyBinding::new(KeyCode::Down, KeyModifiers::NONE),
+            KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        ];
+        if result.keys_for(BindableAction::OpenJiraTicket).contains(&j)
+            && result.keys_for(BindableAction::NavigateDown) == previous_down
+        {
+            result
+                .bindings
+                .get_mut(&BindableAction::NavigateDown)
+                .expect("default navigation exists")
+                .retain(|key| key != &j);
+        }
+        if result.keys_for(BindableAction::OpenJiraTicket) == std::slice::from_ref(&j)
+            && result.bindings.iter().any(|(action, keys)| {
+                *action != BindableAction::OpenJiraTicket && keys.contains(&j)
+            })
+        {
+            result
+                .bindings
+                .get_mut(&BindableAction::OpenJiraTicket)
+                .expect("default Jira action exists")
+                .retain(|key| key != &j);
+        }
         // Rebuild lookup after applying overrides
         result.lookup = KeyBindings::build_lookup(&result.bindings);
         Ok(result)
@@ -1629,7 +1666,7 @@ mod tests {
 
         // Navigation
         let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(kb.resolve(&j), Some(BindableAction::NavigateDown));
+        assert_eq!(kb.resolve(&j), Some(BindableAction::OpenJiraTicket));
 
         let k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&k), Some(BindableAction::NavigateUp));
@@ -1714,7 +1751,36 @@ mod tests {
 
         // Non-overridden defaults still work
         let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(kb.resolve(&j), Some(BindableAction::NavigateDown));
+        assert_eq!(kb.resolve(&j), Some(BindableAction::OpenJiraTicket));
+    }
+
+    #[test]
+    fn jira_legacy_navigation_defaults_migrate_without_conflicts() {
+        let bindings: KeyBindings =
+            toml::from_str(r#"navigate_down = ["j", "Down", "Ctrl-n"]"#).unwrap();
+        let j = KeyBinding::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(!bindings.keys_for(BindableAction::NavigateDown).contains(&j));
+        assert_eq!(
+            bindings.resolve(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(BindableAction::OpenJiraTicket)
+        );
+        let custom: KeyBindings = toml::from_str(r#"navigate_down = ["j"]"#).unwrap();
+        assert_eq!(
+            custom.resolve(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(BindableAction::NavigateDown)
+        );
+        assert!(!custom.keys_for(BindableAction::OpenJiraTicket).contains(&j));
+        // Config's Figment layer supplies serialized defaults before extraction.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[keybindings]\nnavigate_down = ['j']\n").unwrap();
+        let config = crate::config::Config::load_from_path(&path).unwrap();
+        assert_eq!(
+            config
+                .keybindings
+                .resolve(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(BindableAction::NavigateDown)
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
 /// PR metadata returned by `gh pr list` for the session list view.
 #[derive(Debug, Clone)]
 pub struct PrInfo {
+    pub title: Option<String>,
     pub approval_summary: Option<Box<claude_commander_protocol::approval::ApprovalSummary>>,
     pub head_sha: Option<String>,
     pub number: u32,
@@ -140,7 +141,9 @@ impl std::fmt::Display for ChecksStatus {
 ///
 /// Called once at startup to avoid repeated fork/exec on every tick.
 pub async fn is_gh_available() -> bool {
-    match gh_command().arg("--version").output().await {
+    let mut command = gh_command();
+    command.arg("--version");
+    match super::hosting::review_output(command, "gh --version").await {
         Ok(output) => {
             let ok = output.status.success();
             debug!("gh --version: available={}", ok);
@@ -209,8 +212,8 @@ pub async fn check_pr_for_branch(
     branch: &str,
     branch_owned_since: DateTime<Utc>,
 ) -> PrCheckResult {
-    let output = match gh_command()
-        .args([
+    let mut command = gh_command();
+    command.args([
             "pr",
             "list",
             "--head",
@@ -218,14 +221,12 @@ pub async fn check_pr_for_branch(
             "--state",
             "all",
             "--json",
-            "number,url,state,isDraft,labels,baseRefName,headRefOid,reviewDecision,reviewRequests,latestReviews,createdAt,closedAt,mergedAt",
+            "number,title,url,state,isDraft,labels,baseRefName,headRefOid,reviewDecision,reviewRequests,latestReviews,createdAt,closedAt,mergedAt",
             "--limit",
             "5",
         ])
-        .current_dir(repo_path)
-        .output()
-        .await
-    {
+        .current_dir(repo_path);
+    let output = match super::hosting::review_output(command, "gh pr list").await {
         Ok(output) => output,
         Err(e) => {
             debug!("gh pr list spawn failed for branch {}: {}", branch, e);
@@ -400,6 +401,7 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
     let base_ref_name = v["baseRefName"].as_str().map(str::to_string);
 
     Some(PrInfo {
+        title: v["title"].as_str().map(str::to_owned),
         approval_summary: None,
         head_sha: v["headRefOid"].as_str().map(str::to_owned),
         number,
@@ -537,10 +539,11 @@ mod tests {
 
     #[test]
     fn test_parse_pr_list_open() {
-        let json = r#"[{"number":42,"url":"https://github.com/owner/repo/pull/42","state":"OPEN","isDraft":false,"labels":[]}]"#;
+        let json = r#"[{"number":42,"title":"ABC-123 review","url":"https://github.com/owner/repo/pull/42","state":"OPEN","isDraft":false,"labels":[]}]"#;
         let result = parse_pr_list_json(json, owned_since());
         let info = result.info().unwrap();
         assert_eq!(info.number, 42);
+        assert_eq!(info.title.as_deref(), Some("ABC-123 review"));
         assert_eq!(info.url, "https://github.com/owner/repo/pull/42");
         assert_eq!(info.state, PrState::Open);
         assert!(!info.is_draft);

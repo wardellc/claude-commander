@@ -1,19 +1,7 @@
-//! Branch reconciliation: keep `WorktreeSession.branch` in sync with a
-//! worktree's live git HEAD after a branch **rename**.
-//!
-//! `session.branch` is captured at creation and drives every PR lookup
-//! (`gh pr list --head <branch>`) plus stack-parent matching. If the user
-//! renames the underlying git branch (`git branch -m old new`), the stored name
-//! goes stale, the PR poll queries a branch that no longer has a PR, and the
-//! session silently loses its PR + stack topology. This module holds the pure
-//! decision of *whether* to adopt the live branch as the session's new name;
-//! the IO (listing worktrees, checking ref existence) is done by the caller in
-//! [`crate::api::CommanderService::reconcile_session_branches`].
-//!
-//! The rule deliberately fires **only** on a rename — never on a plain
-//! `git switch` to another existing branch — so a user who drives one session
-//! across several existing branches is never thrashed. See
-//! [`decide_branch_reconcile`] for the exact predicate.
+//! Keep a session anchored to its working branch across renames and continuation
+//! from an unused starter. Existing branches stay anchored across temporary
+//! switches. Git evidence is gathered by `starter_branch_continued`; the service
+//! supplies remote-ref, cached-review, main-branch and sibling-ownership guards.
 
 /// Decide whether a session's stored branch should be reconciled to `live`,
 /// the worktree's current HEAD branch. Returns `Some(new_branch)` to adopt it,
@@ -30,18 +18,11 @@
 /// - `sibling_branches` — stored branches of the *other* non-`Creating`
 ///   sessions in the same project.
 ///
-/// The guards, in order:
-/// 1. No live branch, or it already equals `stored`, or it's the synthetic
-///    `"HEAD"` (detached) → nothing to do.
-/// 2. The stored branch still exists locally **or** as `origin/<stored>` → this
-///    is a plain switch (or an as-yet-unpushed rename whose PR still heads the
-///    old name); leave it. Reconciling here would wipe a PR that is currently
-///    displaying correctly.
-/// 3. The live branch is the project's main branch → the session's branch was
-///    deleted and HEAD fell back to main (abandonment, not a rename); leave it.
-/// 4. The live branch is already owned by another session → adopting it would
-///    make two sessions claim one branch and corrupt stack matching; leave it.
-/// 5. Otherwise the old name is gone and the new one is unclaimed → adopt it.
+/// Existing local branches are retained unless `starter_continuation` proves
+/// committed work on a branch created from the initial commit during this session.
+/// The caller only supplies that evidence for a starter without a cached review.
+/// Remote branches, main, and branches owned by sibling sessions are always retained.
+/// With neither old ref present, the existing rename behavior applies.
 pub fn decide_branch_reconcile(
     stored: &str,
     live: Option<&str>,
@@ -49,12 +30,13 @@ pub fn decide_branch_reconcile(
     stored_remote_ref_exists: bool,
     main_branch: &str,
     sibling_branches: &[&str],
+    starter_continuation: bool,
 ) -> Option<String> {
     let live = live?;
     if live == stored || live == "HEAD" {
         return None;
     }
-    if stored_local_ref_exists || stored_remote_ref_exists {
+    if stored_remote_ref_exists || (stored_local_ref_exists && !starter_continuation) {
         return None;
     }
     if live == main_branch {
@@ -66,13 +48,187 @@ pub fn decide_branch_reconcile(
     Some(live.to_string())
 }
 
+/// Recognize committed work on a new branch from an unused session starter.
+/// Missing reflogs, failed commands, and unrelated history are inconclusive.
+pub(crate) async fn starter_branch_continued(
+    worktree: &std::path::Path,
+    stored: &str,
+    live: &str,
+    base: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let stored_ref = format!("refs/heads/{stored}");
+    let live_ref = format!("refs/heads/{live}");
+    let Some(stored_tip) = git_text(worktree, &["rev-parse", "--verify", &stored_ref]).await else {
+        return false;
+    };
+    if stored_tip.trim() != base {
+        return false;
+    }
+    let Some(live_tip) = git_text(worktree, &["rev-parse", "--verify", &live_ref]).await else {
+        return false;
+    };
+    if live_tip.trim() == base {
+        return false;
+    }
+    if git_text(worktree, &["merge-base", "--is-ancestor", base, &live_ref])
+        .await
+        .is_none()
+    {
+        return false;
+    }
+    let Some(reflog) = git_text(
+        worktree,
+        &[
+            "reflog",
+            "show",
+            "--date=unix",
+            "--format=%H%x09%gD%x09%gs",
+            &live_ref,
+        ],
+    )
+    .await
+    else {
+        return false;
+    };
+    if !created_from_start(&reflog, base, created_at) {
+        return false;
+    }
+    let Some(head_reflog) = git_text(
+        worktree,
+        &[
+            "reflog",
+            "show",
+            "--date=unix",
+            "--format=%H%x09%gD%x09%gs",
+            "HEAD",
+        ],
+    )
+    .await
+    else {
+        return false;
+    };
+    committed_in_worktree(
+        &head_reflog,
+        stored,
+        live,
+        base,
+        live_tip.trim(),
+        created_at,
+    )
+}
+
+/// Require commits in this worktree since checking out the new branch at the
+/// starter's base. The service's other-worktree regression uses real Git to pin
+/// the distinction from merely switching to a branch with someone else's work.
+fn committed_in_worktree(
+    reflog: &str,
+    stored: &str,
+    live: &str,
+    base: &str,
+    tip: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let mut committed = false;
+    let expected_checkout = format!("checkout: moving from {stored} to {live}");
+    for (index, entry) in reflog.lines().enumerate() {
+        let Some((sha, timestamp, message)) = reflog_entry(entry) else {
+            return false;
+        };
+        if index == 0 && sha != tip {
+            return false;
+        }
+        if message.starts_with("checkout:") {
+            return committed
+                && sha == base
+                && message == expected_checkout
+                && timestamp > created_at.timestamp();
+        }
+        if !message.starts_with("commit:") && !message.starts_with("commit (") {
+            return false;
+        }
+        committed = true;
+    }
+    false
+}
+
+async fn git_text(repo: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = crate::git::git_command()
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn created_from_start(reflog: &str, base: &str, created_at: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some((sha, timestamp, message)) = reflog.lines().last().and_then(reflog_entry) else {
+        return false;
+    };
+    sha == base && message.starts_with("branch: Created from ")
+        // Reflog dates have second precision, so same-second creation is ambiguous.
+        && timestamp > created_at.timestamp()
+}
+
+fn reflog_entry(entry: &str) -> Option<(&str, i64, &str)> {
+    let mut fields = entry.splitn(3, '\t');
+    let (sha, selector, message) = (fields.next()?, fields.next()?, fields.next()?);
+    let timestamp = selector
+        .rsplit_once("@{")
+        .and_then(|(_, time)| time.strip_suffix('}'))
+        .and_then(|time| time.parse::<i64>().ok())?;
+    Some((sha, timestamp, message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn continuation_requires_a_complete_recent_creation_record() {
+        let created = chrono::DateTime::from_timestamp(100, 500_000_000).unwrap();
+        let valid = "base\trefs/heads/new@{101}\tbranch: Created from main";
+        assert!(created_from_start(valid, "base", created));
+        for invalid in [
+            "",
+            "malformed",
+            "base\trefs/heads/new@{99}\tbranch: Created from main",
+            "base\trefs/heads/new@{100}\tbranch: Created from main",
+            "other\trefs/heads/new@{101}\tbranch: Created from main",
+            "base\trefs/heads/new@{101}\tcommit: retained after reflog expiry",
+            "base\trefs/heads/new@{bad}\tbranch: Created from main",
+        ] {
+            assert!(!created_from_start(invalid, "base", created), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn continuation_preserves_remote_main_and_sibling_guards() {
+        assert_eq!(
+            decide_branch_reconcile("old", Some("new"), true, false, "main", &[], true),
+            Some("new".into())
+        );
+        assert_eq!(
+            decide_branch_reconcile("old", Some("new"), true, true, "main", &[], true),
+            None
+        );
+        assert_eq!(
+            decide_branch_reconcile("old", Some("main"), true, false, "main", &[], true),
+            None
+        );
+        assert_eq!(
+            decide_branch_reconcile("old", Some("new"), true, false, "main", &["new"], true),
+            None
+        );
+    }
+
     // Convenience with the common "no refs, main is `main`, no siblings" case.
     fn decide(stored: &str, live: Option<&str>, local: bool, remote: bool) -> Option<String> {
-        decide_branch_reconcile(stored, live, local, remote, "main", &[])
+        decide_branch_reconcile(stored, live, local, remote, "main", &[], false)
     }
 
     #[test]
@@ -116,7 +272,7 @@ mod tests {
     fn live_equal_to_main_is_left() {
         // Stored branch deleted, HEAD fell back to main → abandonment.
         assert_eq!(
-            decide_branch_reconcile("old", Some("main"), false, false, "main", &[]),
+            decide_branch_reconcile("old", Some("main"), false, false, "main", &[], false),
             None
         );
     }
@@ -125,7 +281,7 @@ mod tests {
     fn collision_with_sibling_is_left() {
         // Adopting `new` would make this session and the sibling both claim it.
         assert_eq!(
-            decide_branch_reconcile("old", Some("new"), false, false, "main", &["new"]),
+            decide_branch_reconcile("old", Some("new"), false, false, "main", &["new"], false),
             None
         );
     }
@@ -133,7 +289,15 @@ mod tests {
     #[test]
     fn adopt_when_sibling_set_does_not_collide() {
         assert_eq!(
-            decide_branch_reconcile("old", Some("new"), false, false, "main", &["unrelated"]),
+            decide_branch_reconcile(
+                "old",
+                Some("new"),
+                false,
+                false,
+                "main",
+                &["unrelated"],
+                false
+            ),
             Some("new".into())
         );
     }

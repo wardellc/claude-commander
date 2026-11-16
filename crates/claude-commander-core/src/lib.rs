@@ -38,6 +38,7 @@ pub mod config;
 pub mod conversation;
 pub mod error;
 pub mod git;
+pub mod jira;
 pub mod paste_image;
 pub mod reviewed;
 pub mod session;

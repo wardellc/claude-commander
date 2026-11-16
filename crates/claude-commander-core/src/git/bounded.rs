@@ -71,12 +71,17 @@ pub(crate) async fn run_bounded(
         // Pinned by `github`'s `a_timed_out_listing_kills_gh_and_its_descendants`
         // and `clone`'s `a_timed_out_run_kills_the_child_and_its_descendants`,
         // which both background a grandchild and assert its pid stops resolving.
-        .process_group(0);
+        .process_group(0)
+        .kill_on_drop(true);
 
     let mut child = cmd.spawn()?;
     // Read once, before the wait: `Child::id` returns `None` after the child has
     // been reaped.
     let pgid = child.id().map(|id| Pid::from_raw(id as i32));
+    // A caller may impose a shorter overall deadline. Dropping this future
+    // must kill descendants too, not just abandon its wait. Pinned by
+    // cancelling_a_bounded_run_kills_its_process_tree.
+    let mut cancellation = KillGroupOnDrop(pgid);
 
     // Drain both pipes concurrently, *before* waiting. Waiting on a child while
     // one of its output pipes fills would deadlock the pair: the child blocks
@@ -90,6 +95,7 @@ pub(crate) async fn run_bounded(
         Err(_) => {
             warn!("{program} exceeded {}s; killing", timeout.as_secs());
             kill_tree(&mut child, pgid).await;
+            cancellation.0 = None;
             // The drain tasks are left detached rather than awaited: they finish
             // on their own once the killed group's write ends close, and there is
             // nothing here that wants their partial output.
@@ -97,7 +103,7 @@ pub(crate) async fn run_bounded(
         }
     };
 
-    Ok(Bounded::Finished {
+    let outcome = Bounded::Finished {
         status,
         // The child has exited, so these awaits normally resolve at once. A
         // panicked drain task degrades to empty output rather than losing the
@@ -112,7 +118,19 @@ pub(crate) async fn run_bounded(
         // here first if a bounded run ever hangs *after* its child exits.
         stdout: stdout.await.unwrap_or_default(),
         stderr: stderr.await.unwrap_or_default(),
-    })
+    };
+    cancellation.0 = None;
+    Ok(outcome)
+}
+
+struct KillGroupOnDrop(Option<Pid>);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            let _ = killpg(pgid, Signal::SIGKILL);
+        }
+    }
 }
 
 /// Read a captured pipe to EOF on its own task.
@@ -154,6 +172,50 @@ mod tests {
     /// default, `pipe(7)`) blocks until someone reads, so a `wait()` that ran
     /// before the drain would hang until the timeout fired. This asserts the
     /// full output arrives well inside a generous budget.
+    #[tokio::test]
+    async fn cancelling_a_bounded_run_kills_its_process_tree() {
+        use nix::sys::signal::kill;
+        use std::time::Instant;
+        let dir = tempfile::TempDir::new().unwrap();
+        let parent_file = dir.path().join("parent.pid");
+        let child_file = dir.path().join("child.pid");
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "sleep 300 & echo $$ > \"$1\"; echo $! > \"$2\"; wait",
+                "sh",
+            ])
+            .arg(&parent_file)
+            .arg(&child_file);
+        let task = tokio::spawn(run_bounded(command, "fixture", Duration::from_secs(60)));
+        let ready_by = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&child_file).is_ok_and(|text| !text.trim().is_empty()) {
+            assert!(Instant::now() < ready_by, "fixture did not start");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let parent: i32 = std::fs::read_to_string(&parent_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let child: i32 = std::fs::read_to_string(&child_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        let dead_by = Instant::now() + Duration::from_secs(5);
+        while kill(Pid::from_raw(child), None).is_ok() && Instant::now() < dead_by {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let stopped = kill(Pid::from_raw(child), None).is_err();
+        // Clean up the fixture even when testing a broken cancellation path.
+        let _ = killpg(Pid::from_raw(parent), Signal::SIGKILL);
+        assert!(stopped, "a cancelled run left its descendant running");
+    }
+
     #[tokio::test]
     async fn output_larger_than_a_pipe_buffer_does_not_deadlock() {
         let mut cmd = Command::new("sh");

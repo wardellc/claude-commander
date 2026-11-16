@@ -1352,19 +1352,11 @@ impl CommanderService {
         Ok(())
     }
 
-    /// Reconcile each session's stored `branch` with its worktree's live git
-    /// HEAD, adopting the live name only when the stored branch was **renamed**
-    /// away (see [`decide_branch_reconcile`] for the exact rule).
-    ///
-    /// A stale `session.branch` silently breaks PR polling (`gh pr list --head`
-    /// queries a branch that no longer has a PR, so PR + stack topology vanish),
-    /// cascade-merge (merges by branch name), and delete-time PR retargeting.
-    /// Running this at the top of every PR-poll tick keeps the one stored name
-    /// authoritative.
-    ///
-    /// Subprocess-only (no gix repository held across an `.await`) so the future
-    /// stays `Send` for the spawned PR-status loop. Idempotent: a pass with no
-    /// renames performs no writes.
+    /// Adopt branch renames or committed work continued from an unused starter.
+    /// Established branches remain anchored across temporary switches. See
+    /// `starter_branch_continued` and `decide_branch_reconcile` for the evidence
+    /// and guards. Reconciliation precedes each PR poll so the new branch is
+    /// queried on the same tick; failed Git queries leave the stored name alone.
     pub async fn reconcile_session_branches(&self) -> Result<()> {
         // Snapshot each project's repo path + main branch under the read lock,
         // plus its reconcile candidates (non-Creating sessions) and the branch
@@ -1375,6 +1367,9 @@ impl CommanderService {
             id: SessionId,
             worktree_path: PathBuf,
             stored: String,
+            base_commit: Option<String>,
+            created_at: DateTime<Utc>,
+            has_review: bool,
         }
         struct ProjectSnapshot {
             repo_path: PathBuf,
@@ -1400,6 +1395,9 @@ impl CommanderService {
                             id: s.id,
                             worktree_path: s.worktree_path.clone(),
                             stored: s.branch.clone(),
+                            base_commit: s.base_commit.clone(),
+                            created_at: s.created_at,
+                            has_review: s.pr_number.is_some(),
                         })
                         .collect();
                     let all_branches = sessions().map(|s| (s.id, s.branch.clone())).collect();
@@ -1465,6 +1463,23 @@ impl CommanderService {
                     .filter(|(id, _)| *id != cand.id)
                     .map(|(_, b)| b.as_str())
                     .collect();
+                let mut starter_continuation = false;
+                if local
+                    && !remote
+                    && !cand.has_review
+                    && let (Some(live), Some(base)) = (live, cand.base_commit.as_deref())
+                    && live != main_branch
+                    && !siblings.contains(&live)
+                {
+                    starter_continuation = crate::session::starter_branch_continued(
+                        &cand.worktree_path,
+                        &cand.stored,
+                        live,
+                        base,
+                        cand.created_at,
+                    )
+                    .await;
+                }
                 if let Some(new_branch) = decide_branch_reconcile(
                     &cand.stored,
                     live,
@@ -1472,6 +1487,7 @@ impl CommanderService {
                     remote,
                     main_branch,
                     &siblings,
+                    starter_continuation,
                 ) {
                     debug!(
                         "branch reconcile: session {} '{}' -> '{}'",
@@ -1607,6 +1623,7 @@ impl CommanderService {
                             apply_approval_observation(session, info);
                             session.pr_number = Some(info.number);
                             session.pr_url = Some(info.url.clone());
+                            session.pr_title = info.title.clone();
                             session.pr_state = Some(info.state);
                             session.pr_draft = info.is_draft;
                             session.pr_labels = info.labels.clone();
@@ -4345,6 +4362,38 @@ fn remove_partial_clone(dest: &Path) {
     }
 }
 
+impl CommanderService {
+    /// Refresh review metadata, then resolve a ticket before falling back to session and branch names.
+    pub async fn jira_reference(&self, id: &SessionId) -> Result<Option<String>> {
+        self.jira_reference_with_refresh_budget(id, Duration::from_secs(10))
+            .await
+    }
+
+    async fn jira_reference_with_refresh_budget(
+        &self,
+        id: &SessionId,
+        budget: Duration,
+    ) -> Result<Option<String>> {
+        self.ensure_session_exists(id).await?;
+        match tokio::time::timeout(budget, self.refresh_pr_status(Some(id))).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                debug!(%error, "Jira lookup could not refresh review metadata; using cached metadata and names")
+            }
+            Err(_) => {
+                debug!("Jira review refresh deadline reached; using cached metadata and names")
+            }
+        }
+        let state = self.store.read().await;
+        let session = state.get_session(id).ok_or(SessionError::NotFound(*id))?;
+        Ok(crate::jira::reference(
+            session.pr_title.as_deref(),
+            &session.title,
+            &session.branch,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6232,8 +6281,85 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn jira_reference_tracks_review_cache_and_name_fallbacks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let project = Project::new("repo", dir.path().join("repo"), "main");
+        let session = WorktreeSession::new(
+            project.id,
+            "DEF-34 name",
+            "ghi-56",
+            dir.path().join("wt"),
+            "claude",
+        );
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.jira_reference(&sid).await.unwrap().as_deref(),
+            Some("DEF-34")
+        );
+        let mut info = approval_test_info();
+        info.title = Some("abc-12 XYZ-99 review".into());
+        svc.apply_pr_results_for_provider(
+            CodeHostProvider::Github,
+            vec![(sid, PrCheckResult::Found(info))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.jira_reference(&sid).await.unwrap().as_deref(),
+            Some("ABC-12")
+        );
+        svc.apply_pr_results_for_provider(
+            CodeHostProvider::Github,
+            vec![(sid, PrCheckResult::FetchFailed)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.jira_reference(&sid).await.unwrap().as_deref(),
+            Some("ABC-12")
+        );
+        svc.apply_pr_results_for_provider(
+            CodeHostProvider::Github,
+            vec![(sid, PrCheckResult::NotFound)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            svc.jira_reference(&sid).await.unwrap().as_deref(),
+            Some("DEF-34")
+        );
+        svc.store()
+            .mutate(move |state| {
+                state.get_session_mut(&sid).unwrap().title = "No ticket".into();
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.jira_reference(&sid).await.unwrap().as_deref(),
+            Some("GHI-56")
+        );
+        svc.store()
+            .mutate(move |state| {
+                state.get_session_mut(&sid).unwrap().branch = "no-ticket".into();
+            })
+            .await
+            .unwrap();
+        assert_eq!(svc.jira_reference(&sid).await.unwrap(), None);
+        assert!(svc.jira_reference(&SessionId::new()).await.is_err());
+    }
+
     fn approval_test_info() -> crate::git::PrInfo {
         crate::git::PrInfo {
+            title: Some("ABC-123 review title".into()),
             number: 42,
             url: "https://example/pr/42".into(),
             state: crate::git::PrState::Open,
@@ -6573,6 +6699,7 @@ mod tests {
         let (_pid, sid) = seed_project_session(&svc).await;
 
         let info = PrInfo {
+            title: Some("ABC-123 review title".into()),
             number: 42,
             url: "https://example/pr/42".to_string(),
             state: crate::git::PrState::Open,
@@ -6623,6 +6750,7 @@ mod tests {
         let poll_started = Utc::now() - chrono::Duration::seconds(3);
         let refresh_started = poll_started + chrono::Duration::seconds(1);
         let found = PrCheckResult::Found(PrInfo {
+            title: Some("ABC-123 review title".into()),
             number: 42,
             url: "https://example/pr/42".to_string(),
             state: crate::git::PrState::Open,
@@ -6689,6 +6817,7 @@ mod tests {
         let (_pid, sid) = seed_project_session(&svc).await;
         let (provider, epoch) = svc.review_provider_snapshot().await;
         let found = PrCheckResult::Found(PrInfo {
+            title: Some("ABC-123 review title".into()),
             number: 42,
             url: "https://example/pr/42".to_string(),
             state: crate::git::PrState::Open,
@@ -6832,6 +6961,7 @@ mod tests {
         let (_pid, sid) = seed_project_session(&svc).await;
         let review = |number| {
             PrCheckResult::Found(PrInfo {
+                title: Some("ABC-123 review title".into()),
                 number,
                 url: format!("https://github.example/pr/{number}"),
                 state: PrState::Open,
@@ -7512,6 +7642,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_session_branches_follows_work_from_unused_starter() {
+        for case in [
+            "continued",
+            "existing",
+            "other-worktree",
+            "starter-work",
+            "remote",
+            "cached-review",
+            "missing-base",
+            "missing-reflog",
+            "unrelated",
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let svc = service(&dir);
+            let repo = dir.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            run_git(&repo, &["init", "-b", "main"]);
+            run_git(&repo, &["config", "user.email", "t@t.t"]);
+            run_git(&repo, &["config", "user.name", "t"]);
+            std::fs::write(repo.join("f.txt"), "base").unwrap();
+            run_git(&repo, &["add", "."]);
+            run_git(&repo, &["commit", "-m", "init"]);
+            let base = fixture_git_std()
+                .current_dir(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            assert!(base.status.success());
+            let base = String::from_utf8(base.stdout).unwrap().trim().to_owned();
+            let wt = dir.path().join("wt-feature");
+            run_git(
+                &repo,
+                &["worktree", "add", "-b", "starter", wt.to_str().unwrap()],
+            );
+            let project = Project::new("repo", repo.clone(), "main");
+            let mut session =
+                WorktreeSession::new(project.id, "starter", "starter", wt.clone(), "claude");
+            session.base_commit = (case != "missing-base").then_some(base.clone());
+            // Reflog dates have second precision; avoid sleeping in the test.
+            session.created_at -= chrono::Duration::seconds(2);
+            if case == "cached-review" {
+                session.pr_number = Some(42);
+            }
+            let sid = session.id;
+            svc.store()
+                .mutate(move |state| {
+                    state.add_project(project);
+                    state.add_session(session);
+                })
+                .await
+                .unwrap();
+
+            match case {
+                "existing" => {
+                    // An existing branch must remain temporary even if it was
+                    // created at the same base and gains commits after the switch.
+                    let status = fixture_git_std()
+                        .current_dir(&wt)
+                        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                        .args(["branch", "ticket-branch"])
+                        .status()
+                        .unwrap();
+                    assert!(status.success());
+                    run_git(&wt, &["switch", "ticket-branch"]);
+                }
+                "other-worktree" => {
+                    run_git(&repo, &["switch", "-c", "ticket-branch"]);
+                    std::fs::write(repo.join("f.txt"), "work elsewhere").unwrap();
+                    run_git(&repo, &["commit", "-am", "work in another worktree"]);
+                    run_git(&repo, &["switch", "main"]);
+                    run_git(&wt, &["switch", "ticket-branch"]);
+                }
+                "starter-work" => {
+                    std::fs::write(wt.join("f.txt"), "starter work").unwrap();
+                    run_git(&wt, &["commit", "-am", "starter work"]);
+                    run_git(&wt, &["switch", "-c", "ticket-branch"]);
+                }
+                "unrelated" => run_git(&wt, &["switch", "--orphan", "ticket-branch"]),
+                _ => run_git(&wt, &["switch", "-c", "ticket-branch"]),
+            }
+            if case == "remote" {
+                run_git(&wt, &["update-ref", "refs/remotes/origin/starter", &base]);
+            }
+            svc.reconcile_session_branches().await.unwrap();
+            assert_eq!(
+                svc.store().read().await.get_session(&sid).unwrap().branch,
+                "starter",
+                "{case}: a branch without new work must not be adopted"
+            );
+            std::fs::write(wt.join("f.txt"), "work").unwrap();
+            run_git(&wt, &["add", "."]);
+            run_git(&wt, &["commit", "-m", "work"]);
+            if case == "missing-reflog" {
+                run_git(
+                    &wt,
+                    &[
+                        "reflog",
+                        "expire",
+                        "--expire=all",
+                        "refs/heads/ticket-branch",
+                    ],
+                );
+            }
+            svc.reconcile_session_branches().await.unwrap();
+            let expected = if case == "continued" {
+                "ticket-branch"
+            } else {
+                "starter"
+            };
+            assert_eq!(
+                svc.store().read().await.get_session(&sid).unwrap().branch,
+                expected,
+                "{case}"
+            );
+            let targets = svc.pr_refresh_targets(Some(&sid)).await.unwrap();
+            assert_eq!(
+                targets[0].1, expected,
+                "{case}: poll the correct branch on the same tick"
+            );
+
+            run_git(&wt, &["switch", "starter"]);
+            svc.reconcile_session_branches().await.unwrap();
+            assert_eq!(
+                svc.store().read().await.get_session(&sid).unwrap().branch,
+                expected,
+                "{case}: a temporary switch back must preserve the established branch"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn snapshot_reports_paused_cascade() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
@@ -7957,6 +8218,7 @@ mod tests {
         svc.apply_pr_results(vec![(
             sid,
             crate::git::PrCheckResult::Found(crate::git::PrInfo {
+                title: Some("ABC-123 review title".into()),
                 number: 7,
                 url: "https://example.invalid/pr/7".to_string(),
                 state: crate::git::PrState::Open,
@@ -8157,6 +8419,157 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn jira_refresh_deadline_preserves_fallback_and_stops_provider_children() {
+        const CHILD: &str = "CC_TEST_JIRA_DEADLINE_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                use nix::sys::signal::{Signal, kill, killpg};
+                use nix::unistd::Pid;
+                let dir = tempfile::TempDir::new_in(root).unwrap();
+                let provider = if std::env::var("CC_TEST_JIRA_PROVIDER").unwrap() == "gitlab" {
+                    CodeHostProvider::Gitlab
+                } else {
+                    CodeHostProvider::Github
+                };
+                let stage = std::env::var("CC_TEST_JIRA_STAGE").unwrap();
+                let svc = service_with_config(
+                    &dir,
+                    Config {
+                        code_host_provider: provider,
+                        ..Config::default()
+                    },
+                );
+                let pid_dir =
+                    std::path::PathBuf::from(std::env::var_os("CC_TEST_JIRA_PID_DIR").unwrap());
+                let project = Project::new("repo", dir.path().to_path_buf(), "main");
+                let mut session = WorktreeSession::new(
+                    project.id,
+                    if stage == "missing" {
+                        "No ticket"
+                    } else {
+                        "NAME-42"
+                    },
+                    "task",
+                    dir.path().join("wt"),
+                    "claude",
+                );
+                if stage == "approval" {
+                    session.pr_title = Some("CACHED-73 review".into());
+                }
+                let sid = session.id;
+                svc.store()
+                    .mutate(move |state| {
+                        state.add_project(project);
+                        state.add_session(session);
+                    })
+                    .await
+                    .unwrap();
+                let result = tokio::time::timeout(
+                    Duration::from_secs(8),
+                    svc.jira_reference_with_refresh_budget(&sid, Duration::from_secs(2)),
+                )
+                .await;
+                let expected = match stage.as_str() {
+                    "approval" => Some("CACHED-73"),
+                    "missing" => None,
+                    _ => Some("NAME-42"),
+                };
+                let files = std::fs::read_dir(&pid_dir)
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                assert!(
+                    !files.is_empty(),
+                    "the delayed provider command never started: {stage}"
+                );
+                let mut survivors = Vec::new();
+                for file in files {
+                    let pids = std::fs::read_to_string(file.path())
+                        .unwrap()
+                        .split_whitespace()
+                        .map(|s| s.parse::<i32>().unwrap())
+                        .collect::<Vec<_>>();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    for &pid in &pids {
+                        while kill(Pid::from_raw(pid), None).is_ok()
+                            && std::time::Instant::now() < deadline
+                        {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        if kill(Pid::from_raw(pid), None).is_ok() {
+                            survivors.push(pid);
+                        }
+                    }
+                    // Also clean up if this test is run against a broken implementation.
+                    if pids.iter().any(|pid| survivors.contains(pid)) {
+                        let _ = killpg(Pid::from_raw(pids[0]), Signal::SIGKILL);
+                    }
+                }
+                assert!(
+                    survivors.is_empty(),
+                    "provider processes survived the Jira deadline: {survivors:?}"
+                );
+                assert_eq!(
+                    result
+                        .expect("Jira lookup stalled beyond its deadline")
+                        .unwrap()
+                        .as_deref(),
+                    expected,
+                    "{stage}"
+                );
+            });
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::TempDir::new().unwrap();
+        let script = r#"#!/bin/sh
+phase=list
+case "$1" in --version|version) phase=version ;; esac
+case "$2" in graphql|*/approvals|*/approval_state) phase=approval ;; esac
+stage="$CC_TEST_JIRA_STAGE"
+[ "$stage" = missing ] && stage=list
+if [ "$phase" = "$stage" ]; then
+  sleep 60 &
+  echo "$$ $!" > "$CC_TEST_JIRA_PID_DIR/$$.pids"
+  wait
+  exit 1
+fi
+[ "$phase" = version ] && exit 0
+if [ "$CC_TEST_JIRA_PROVIDER" = github ]; then
+  printf '%s' '[{"number":7,"title":"REMOTE-7","url":"https://github.com/example/repo/pull/7","state":"OPEN","headRefOid":"head"}]'
+else
+  printf '%s' '[{"iid":7,"title":"REMOTE-7","web_url":"https://gitlab.example/example/repo/-/merge_requests/7","source_branch":"task","state":"opened","sha":"head"}]'
+fi
+"#;
+        for cli in ["gh", "glab"] {
+            let path = root.path().join(cli);
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths(
+            std::iter::once(root.path().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        for provider in ["github", "gitlab"] {
+            for stage in ["version", "list", "approval", "missing"] {
+                let pid_dir = root.path().join(format!("{provider}-{stage}"));
+                std::fs::create_dir(&pid_dir).unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "api::tests::jira_refresh_deadline_preserves_fallback_and_stops_provider_children", "--nocapture"])
+                    .env(CHILD, root.path()).env("CC_TEST_JIRA_PID_DIR", &pid_dir).env("CC_TEST_JIRA_PROVIDER", provider).env("CC_TEST_JIRA_STAGE", stage).env("PATH", &path).output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{provider}/{stage}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pr_refresh_fetches_and_persists_without_background_tasks() {
         // Isolate PATH in a child process, so concurrent tests never use the fake gh.
         const CHILD: &str = "CC_TEST_PR_REFRESH_CHILD";
@@ -8200,6 +8613,13 @@ mod tests {
                     })
                     .await
                     .unwrap();
+                svc.config_store
+                    .mutate(|c| c.pr_check_interval_secs = 0)
+                    .unwrap();
+                assert_eq!(
+                    svc.jira_reference(&first_id).await.unwrap().as_deref(),
+                    Some("JIRA-123")
+                );
                 assert_eq!(svc.refresh_pr_status(Some(&first_id)).await.unwrap(), 1);
                 {
                     let state = svc.store().read().await;
@@ -8268,7 +8688,7 @@ if [ -f "$CC_TEST_PR_REFRESH_FAIL" ]; then exit 1; fi
 if [ "$1" = "api" ]; then
   printf '%s' '{"data":{"repository":{"pullRequest":{"headRefOid":"head","reviewDecision":"APPROVED","latestOpinionatedReviews":{"totalCount":1,"nodes":[{"author":{"login":"owner"},"state":"APPROVED"}]}}}}}'
 else
-  printf '%s' '[{"number":42,"url":"https://github.com/example/repo/pull/42","state":"OPEN","headRefOid":"head"}]'
+  printf '%s' '[{"number":42,"title":"JIRA-123 review","url":"https://github.com/example/repo/pull/42","state":"OPEN","headRefOid":"head"}]'
 fi
 "#,
         )
@@ -8293,7 +8713,7 @@ source_branch=
 for arg in "$@"; do
   case "$arg" in source_branch=*) source_branch="${arg#source_branch=}" ;; esac
 done
-printf '[{"iid":84,"web_url":"https://gitlab.example/example/repo/-/merge_requests/84","state":"opened","labels":[],"sha":"head","source_branch":"%s","target_branch":"main"}]' "$source_branch"
+printf '[{"iid":84,"title":"JIRA-123 review","web_url":"https://gitlab.example/example/repo/-/merge_requests/84","state":"opened","labels":[],"sha":"head","source_branch":"%s","target_branch":"main"}]' "$source_branch"
 "#).unwrap();
         std::fs::set_permissions(&glab, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::join_paths(
@@ -8368,6 +8788,7 @@ printf '[{"iid":84,"web_url":"https://gitlab.example/example/repo/-/merge_reques
                     // The fake gh is now blocked inside the refresh's host query,
                     // so this check started strictly after the refresh did.
                     let found = PrCheckResult::Found(PrInfo {
+                        title: Some("ABC-123 review title".into()),
                         number: 99,
                         url: "https://github.com/example/repo/pull/99".to_string(),
                         state: crate::git::PrState::Open,

@@ -285,6 +285,26 @@ pub(super) fn reset_confirm_message(title: Option<&str>, pending_program: Option
     )
 }
 
+/// Check both launch and exit failures without letting the browser helper write over the TUI.
+async fn launch_browser_command(
+    command: &mut tokio::process::Command,
+    label: &str,
+) -> std::result::Result<(), String> {
+    let status = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map_err(|error| format!("Failed to open {label} in browser: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Failed to open {label} in browser: browser launcher exited with {status}"
+        ));
+    }
+    Ok(())
+}
+
 impl App {
     /// Open `Modal::PathInput` at the current working directory with its
     /// subdirectory list already populated.
@@ -572,21 +592,68 @@ impl App {
             return;
         };
 
-        let result = if cfg!(target_os = "macos") {
-            std::process::Command::new("open").arg(&url).spawn()
-        } else if cfg!(target_os = "windows") {
-            std::process::Command::new("cmd")
-                .args(["/c", "start", "", &url])
-                .spawn()
-        } else {
-            std::process::Command::new("xdg-open").arg(&url).spawn()
-        };
+        self.open_browser(&url, "PR");
+    }
 
-        if let Err(e) = result {
+    pub(super) fn handle_open_jira_ticket(&mut self) {
+        let Some(sref) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let Some(hostname) = self.config.jira_hostname.clone() else {
             self.ui_state.modal = Modal::Error {
-                message: format!("Failed to open PR in browser: {}", e),
+                        message: "No Jira hostname configured. Set Jira Hostname in Settings → General (for example jira.example.com).".into(),
+                    };
+            return;
+        };
+        if let Err(reason) = claude_commander_core::jira::validate_hostname(&hostname) {
+            self.ui_state.modal = Modal::Error {
+                message: format!("Invalid Jira hostname: {reason}"),
             };
+            return;
         }
+        let backend = self.backend_arc(sref.backend);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = match backend.jira_reference(sref.id).await {
+                Ok(Some(ticket)) => claude_commander_core::jira::browse_url(&hostname, &ticket)
+                    .map_err(str::to_owned),
+                Ok(None) => Err(
+                    "Can't find a Jira reference in the PR/MR title, session name or branch."
+                        .into(),
+                ),
+                Err(e) => Err(format!("Failed to look up Jira ticket: {e}")),
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::JiraTicketReady {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) fn open_browser(&mut self, url: &str, label: &str) {
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = tokio::process::Command::new("open");
+            command.arg(url);
+            command
+        } else if cfg!(target_os = "windows") {
+            let mut command = tokio::process::Command::new("cmd");
+            command.args(["/c", "start", "", url]);
+            command
+        } else {
+            let mut command = tokio::process::Command::new("xdg-open");
+            command.arg(url);
+            command
+        };
+        let tx = self.event_loop.sender();
+        let label = label.to_owned();
+        tokio::spawn(async move {
+            if let Err(message) = launch_browser_command(&mut command, &label).await {
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::Error { message }))
+                    .await;
+            }
+        });
     }
 
     /// Open (creating or reviving if needed) the persistent commander session,
@@ -3462,4 +3529,29 @@ pub(super) fn branch_entries_from_pairs(
     }
 
     entries
+}
+
+#[cfg(all(test, unix))]
+mod browser_tests {
+    use super::launch_browser_command;
+
+    #[tokio::test]
+    async fn browser_launcher_reports_nonzero_exit_and_spawn_failure() {
+        let error = launch_browser_command(
+            tokio::process::Command::new("sh").args(["-c", "exit 7"]),
+            "Jira ticket",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Jira ticket"));
+        assert!(error.contains('7'));
+        let dir = tempfile::TempDir::new().unwrap();
+        let error = launch_browser_command(
+            &mut tokio::process::Command::new(dir.path().join("missing-browser-helper")),
+            "Jira ticket",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Failed to open Jira ticket"));
+    }
 }

@@ -317,6 +317,13 @@ impl CommanderBackend for RemoteBackend {
         self.client.mark_read(id).await.map_err(into_backend_error)
     }
 
+    async fn jira_reference(&self, id: SessionId) -> BResult<Option<String>> {
+        self.client
+            .jira_reference(id)
+            .await
+            .map_err(into_backend_error)
+    }
+
     async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool> {
         self.client
             .toggle_keep_alive(id)

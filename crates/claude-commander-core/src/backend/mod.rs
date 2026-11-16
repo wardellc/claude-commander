@@ -659,6 +659,9 @@ pub trait CommanderBackend: Send + Sync {
     /// value. The flag lives with the session's owning host, so remote
     /// backends toggle it server-side.
     async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool>;
+
+    /// First Jira reference from the host's cached PR/MR title, session name or branch.
+    async fn jira_reference(&self, id: SessionId) -> BResult<Option<String>>;
     /// Mark a batch of sessions unread (paired with [`Self::mark_read`]).
     async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()>;
 

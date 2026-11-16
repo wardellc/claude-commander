@@ -596,6 +596,15 @@ impl CommanderBackend for MockBackend {
         })
     }
 
+    async fn jira_reference(&self, id: SessionId) -> BResult<Option<String>> {
+        let snapshot = self.snapshot().await?;
+        Ok(snapshot
+            .sessions
+            .iter()
+            .find(|s| s.session_id == id)
+            .and_then(|s| crate::jira::reference(None, &s.title, &s.branch)))
+    }
+
     async fn toggle_keep_alive(&self, _id: SessionId) -> BResult<bool> {
         self.guard()?;
         Ok(true)

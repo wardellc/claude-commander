@@ -360,7 +360,10 @@ impl App {
                             (target + len - 1) % len
                         }
                     };
-                    match (self.config.keybindings.resolve(&key), key.code) {
+                    match (
+                        super::input::modal_key_action(&key, &self.config.keybindings),
+                        key.code,
+                    ) {
                         (Some(BindableAction::NavigateDown), _) | (_, KeyCode::Down) => {
                             ws.editing = Some(WorkspacesEditing::MovingProject {
                                 project_id,
@@ -394,7 +397,7 @@ impl App {
 
         // --- Navigation ---
         use claude_commander_core::config::keybindings::BindableAction;
-        let action = self.config.keybindings.resolve(&key);
+        let action = super::input::modal_key_action(&key, &self.config.keybindings);
         match state.workspaces_state.focus {
             WorkspacesFocus::List => match (action, key.code) {
                 (Some(BindableAction::NavigateDown), _) => {

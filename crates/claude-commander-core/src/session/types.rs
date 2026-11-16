@@ -152,6 +152,9 @@ pub struct WorktreeSession {
     /// Hosted pull-request or merge-request URL.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Last successfully polled PR/MR title, used for Jira ticket lookup.
+    #[serde(default)]
+    pub pr_title: Option<String>,
     /// Whether the review has been merged (kept for backward compat — derived from pr_state).
     #[serde(default)]
     pub pr_merged: bool,
@@ -272,6 +275,7 @@ impl WorktreeSession {
             shell_tmux_session_name: None,
             pr_number: None,
             pr_url: None,
+            pr_title: None,
             pr_merged: false,
             pr_state: None,
             pr_draft: false,
@@ -325,6 +329,7 @@ impl WorktreeSession {
             shell_tmux_session_name: None,
             pr_number: None,
             pr_url: None,
+            pr_title: None,
             pr_merged: false,
             pr_state: None,
             pr_draft: false,
@@ -401,6 +406,7 @@ impl WorktreeSession {
     pub(crate) fn clear_review_metadata(&mut self) {
         self.pr_number = None;
         self.pr_url = None;
+        self.pr_title = None;
         self.pr_state = None;
         self.pr_draft = false;
         self.pr_labels.clear();

@@ -243,7 +243,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | Key | Action |
 |-----|--------|
 | `v` | Cycle the view: project list → section list → section-stack list → board → (repeat); section views are skipped when no `[[sections]]` are configured |
-| `j/k` or `↑/↓` or `Ctrl-n/p` | Move up / down (within a board column, or through the list) |
+| `k` / `↑` / `Ctrl-p` or `↓` / `Ctrl-n` | Move up / down (within a board column, or through the list) |
 | `h/l` or `←/→` | Move between columns / groups (the project sidebar is the board's leftmost column) |
 | `]` / `[` | Next / previous column or group |
 | `PageUp` / `PageDown` | Move up / down a screenful (within the board column, or through the list; stops at the ends rather than wrapping) |
@@ -270,6 +270,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE (also works inside the review diff, opening that session's worktree) |
 | `o` | Open PR in browser (when the session has a PR) |
+| `j` | Open Jira ticket (PR/MR title → session name → branch; configure `jira_hostname`) |
 | palette only | Refresh PR status (force an immediate re-check for all sessions instead of waiting for the `pr_check_interval_secs` cadence) |
 | `C` | Open the commander session (a persistent, project-less Claude session that coordinates others; requires `commander_enabled = true`). While it is running, a `● Commander` chip in the footer status bar shows its live state (`· working` / `· waiting` / `· idle`) |
 | `Alt-c` | Open/close the conversation overlay: a full-screen chat with a dedicated Claude session whose replies stream in and are spoken aloud via an OpenAI-compatible TTS engine. Enable it first in Settings ▸ Voice (off by default); see [Conversation mode](docs/configuration.md#conversation-mode-tts). The session keeps running when the overlay is closed |

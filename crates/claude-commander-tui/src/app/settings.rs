@@ -139,6 +139,14 @@ impl App {
                         },
                         "editor_gui",
                     ),
+                    SettingsRow::header("Jira"),
+                    SettingsRow::text(
+                        "Jira Hostname",
+                        c.jira_hostname
+                            .clone()
+                            .unwrap_or_else(|| "(not configured)".into()),
+                        "jira_hostname",
+                    ),
                     SettingsRow::header("Pull Requests & Sync"),
                     SettingsRow::text(
                         "Code Host",
@@ -1468,6 +1476,20 @@ impl App {
                     }
                     Err(_) => {}
                 },
+                "jira_hostname" => {
+                    let hostname = value.trim();
+                    let hostname = (!hostname.is_empty() && hostname != "(not configured)")
+                        .then(|| hostname.to_owned());
+                    if let Some(host) = hostname.as_deref()
+                        && let Err(reason) = claude_commander_core::jira::validate_hostname(host)
+                    {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Invalid Jira hostname: {reason}"),
+                        };
+                        return;
+                    }
+                    self.config.jira_hostname = hostname;
+                }
                 "editor" => {
                     self.config.editor = if value.is_empty() || value == "(auto)" {
                         None
@@ -2186,6 +2208,9 @@ impl App {
                         state.editing = None;
                         self.apply_settings_edit_live(state.tab, &field_key, &val)
                             .await;
+                        if matches!(self.ui_state.modal, Modal::Error { .. }) {
+                            return;
+                        }
                         // Refresh rows after applying
                         state.rows = self.settings_rows(&state);
                         self.ui_state.modal = Modal::Settings(state);
@@ -2281,7 +2306,7 @@ impl App {
                 return;
             }
 
-            match self.config.keybindings.resolve(&key) {
+            match super::input::modal_key_action(&key, &self.config.keybindings) {
                 Some(BindableAction::NavigateDown) => {
                     state.selected_row = step_selectable(&state.rows, state.selected_row, true);
                     self.ui_state.modal = Modal::Settings(state);
@@ -2536,7 +2561,7 @@ impl App {
             SectionsFocus::List => {
                 use claude_commander_core::config::keybindings::BindableAction;
 
-                match self.config.keybindings.resolve(&key) {
+                match super::input::modal_key_action(&key, &self.config.keybindings) {
                     Some(BindableAction::NavigateDown) => {
                         if sections_len > 0 {
                             sec.selected_section = (sec.selected_section + 1) % sections_len;
@@ -2640,7 +2665,7 @@ impl App {
                     0
                 };
 
-                match self.config.keybindings.resolve(&key) {
+                match super::input::modal_key_action(&key, &self.config.keybindings) {
                     Some(BindableAction::NavigateDown) => {
                         if pred_count > 0 {
                             sec.pred_selected = (sec.pred_selected + 1) % pred_count;
@@ -3026,7 +3051,7 @@ impl App {
         // navigated/retargeted/closed, but not edited.
         let editable = !prog.loading && prog.load_error.is_none();
         let programs_len = prog.entries.len();
-        let resolved = self.config.keybindings.resolve(&key);
+        let resolved = super::input::modal_key_action(&key, &self.config.keybindings);
 
         match prog.focus {
             ProgramsFocus::List => match resolved {
